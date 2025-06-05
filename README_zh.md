@@ -1,242 +1,286 @@
 # Docker 镜像推送工具
 
-Docker Image Pusher 是一个用 Rust 编写的命令行工具，允许用户将 Docker 镜像 tar 包直接推送到 Docker 镜像仓库。该工具专为高效处理大型镜像而设计，包括超过 10GB 的镜像，通过分块上传确保传输的稳定性和可靠性。
+[![构建状态](https://github.com/yorelog/docker-image-pusher/workflows/Build%20and%20Test/badge.svg)](https://github.com/yorelog/docker-image-pusher/actions)
+[![Crates.io](https://img.shields.io/crates/v/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
+[![许可证: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🎯 适用场景
+Docker Image Pusher 是一个用 Rust 编写的高性能命令行工具，能够将 Docker 镜像 tar 包直接上传到 Docker 镜像仓库。专为企业环境和离线部署设计，通过智能分块上传和并发处理高效处理大型镜像（>10GB）。
 
-### 离线环境部署
-- **内网环境**：在无法访问外网的企业内网环境中，需要将镜像从外网传输到内网私有仓库
-- **空气隙环境**：在完全隔离的安全环境中，通过物理介质（U盘、移动硬盘）传输镜像
-- **边缘计算**：在网络条件受限的边缘节点部署应用
-- **生产环境隔离**：将开发/测试环境的镜像安全传输到生产环境
+## [🇺🇸 English Documentation](README.md)
 
-### 镜像离线拷贝
-- **跨云迁移**：在不同云服务商之间迁移容器化应用
-- **备份恢复**：创建镜像备份并在需要时快速恢复
-- **版本管理**：离线存储和管理特定版本的镜像
-- **合规要求**：满足数据不出境或安全审计要求的镜像传输
+## ✨ 核心特性
 
-## ✨ 功能特性
+- **🚀 高性能**：多线程分块上传，支持可配置并发数
+- **📦 大镜像支持**：针对大于 10GB 的镜像优化，支持断点续传
+- **🔐 企业级安全**：全面的身份验证支持，包括令牌管理
+- **🌐 多仓库兼容**：兼容 Docker Hub、Harbor、AWS ECR、Google GCR、Azure ACR
+- **📊 进度跟踪**：实时上传进度和详细反馈
+- **🛡️ 强大的错误处理**：自动重试机制和优雅的故障恢复
+- **⚙️ 灵活配置**：支持环境变量、配置文件和命令行参数
 
-- **分块上传**：支持大型 Docker 镜像的分块上传，确保上传过程的稳定性和可靠性
-- **Docker Registry API 交互**：直接与 Docker 镜像仓库 API 交互，实现无缝镜像上传
-- **身份验证支持**：处理与 Docker 镜像仓库的身份验证，包括令牌获取和会话管理
-- **进度跟踪**：提供实时的上传进度反馈
-- **多种镜像仓库支持**：支持 Docker Hub、Harbor、AWS ECR、Google GCR 等主流镜像仓库
-- **断点续传**：网络中断时支持断点续传，提高大文件传输成功率
-- **并发上传**：支持多线程并发上传，提升传输效率
-- **TLS 验证**：支持跳过 TLS 验证，适用于自签名证书的私有仓库
+## 🎯 使用场景
 
-## 🔧 安装
+### 离线和空气隔离部署
+- **企业网络**：在无法访问互联网的内网环境中传输镜像到内部仓库
+- **合规要求**：满足数据主权和安全审计要求
+- **边缘计算**：部署到连接受限的远程位置
+- **CI/CD 流水线**：在开发和生产环境之间自动化镜像传输
 
-### 预编译二进制文件
+## 📥 安装
 
-从 [发布页面](https://github.com/yorelog/docker-image-pusher/releases) 下载最新版本。
+### 方式 1：下载预编译二进制文件
+从 [GitHub Releases](https://github.com/yorelog/docker-image-pusher/releases) 下载：
 
-### 从源码构建
+```bash
+# Linux x64
+wget https://github.com/yorelog/docker-image-pusher/releases/latest/download/docker-image-pusher-x86_64-unknown-linux-gnu
+chmod +x docker-image-pusher-x86_64-unknown-linux-gnu
 
-确保您已安装 Rust 和 Cargo，然后运行以下命令：
+# macOS Intel
+wget https://github.com/yorelog/docker-image-pusher/releases/latest/download/docker-image-pusher-x86_64-apple-darwin
+chmod +x docker-image-pusher-x86_64-apple-darwin
 
+# macOS Apple Silicon  
+wget https://github.com/yorelog/docker-image-pusher/releases/latest/download/docker-image-pusher-aarch64-apple-darwin
+chmod +x docker-image-pusher-aarch64-apple-darwin
+```
+
+### 方式 2：通过 Cargo 安装
+```bash
+cargo install docker-image-pusher
+```
+
+### 方式 3：从源码构建
 ```bash
 git clone https://github.com/yorelog/docker-image-pusher.git
 cd docker-image-pusher
 cargo build --release
+# 二进制文件位于 ./target/release/docker-image-pusher
 ```
 
-## 🚀 使用方法
+## 🚀 快速开始
 
 ### 基本用法
-
 ```bash
-# 推送镜像到私有仓库
+# 简单的身份验证推送
 docker-image-pusher \
-  -r https://your-registry.com/project/app:v1.0 \
-  -f /path/to/your-image.tar \
-  -u your-username \
-  -p your-password
+  -r https://registry.example.com/project/app:v1.0 \
+  -f /path/to/image.tar \
+  -u username \
+  -p password
 ```
 
-### 离线部署典型流程
-
-#### 1. 在有网络的环境中导出镜像
-
+### 常见工作流程
 ```bash
-# 拉取镜像
-docker pull nginx:latest
+# 1. 从 Docker 导出镜像
+docker save nginx:latest -o nginx.tar
 
-# 导出为 tar 文件
-docker save nginx:latest -o nginx-latest.tar
-```
-
-#### 2. 传输到离线环境
-
-通过物理介质（U盘、移动硬盘）或内网文件传输工具将 tar 文件传输到目标环境。
-
-#### 3. 在离线环境中推送到私有仓库
-
-```bash
-# 推送到内网 Harbor 仓库
+# 2. 推送到私有仓库
 docker-image-pusher \
-  -r https://harbor.internal.com/library/nginx:latest \
-  -f nginx-latest.tar \
+  -r https://harbor.company.com/library/nginx:latest \
+  -f nginx.tar \
   -u admin \
-  -p Harbor12345 \
-  --skip-tls
+  -p harbor_password \
+  --verbose
 ```
 
-### 高级用法
+## 📖 命令参考
 
-#### 批量镜像处理
+### 快速参考表
 
+| 短参数 | 长参数 | 描述 | 示例 |
+|--------|--------|------|------|
+| `-r` | `--repository-url` | 完整的仓库URL（必需） | `https://registry.com/project/app:v1.0` |
+| `-f` | `--file` | Docker镜像tar文件路径（必需） | `/path/to/image.tar` |
+| `-u` | `--username` | 仓库用户名 | `admin` |
+| `-p` | `--password` | 仓库密码 | `secret123` |
+| `-c` | `--chunk-size` | 上传块大小（字节） | `10485760` (10MB) |
+| `-j` | `--concurrency` | 并发上传数量 | `4` |
+| `-k` | `--skip-tls` | 跳过TLS证书验证 | - |
+| `-v` | `--verbose` | 启用详细输出 | - |
+| `-t` | `--timeout` | 网络超时时间（秒） | `300` |
+| `-n` | `--dry-run` | 验证模式（不实际上传） | - |
+| `-o` | `--output` | 输出格式：text/json/yaml | `json` |
+
+### 高级示例
+
+#### 大镜像自定义设置
 ```bash
-# 使用脚本批量处理多个镜像
+docker-image-pusher \
+  -r https://registry.example.com/ml/pytorch:latest \
+  -f pytorch-15gb.tar \
+  -u ml-user \
+  -p $(cat ~/.registry-password) \
+  --chunk-size 52428800 \    # 50MB 块
+  --concurrency 8 \          # 8 个并行上传
+  --timeout 1800 \           # 30 分钟超时
+  --retry 5 \                # 失败块重试 5 次
+  --verbose
+```
+
+#### 企业 Harbor 仓库
+```bash
+docker-image-pusher \
+  -r https://harbor.company.com/production/webapp:v2.1.0 \
+  -f webapp-v2.1.0.tar \
+  -u prod-deployer \
+  -p $HARBOR_PASSWORD \
+  --registry-type harbor \
+  --skip-tls \               # 用于自签名证书
+  --force                    # 覆盖现有镜像
+```
+
+#### 批处理脚本
+```bash
+#!/bin/bash
+# 处理多个镜像
 for tar_file in *.tar; do
   image_name=$(basename "$tar_file" .tar)
+  echo "正在处理 $image_name..."
+  
   docker-image-pusher \
-    -r "https://registry.internal.com/library/${image_name}:latest" \
+    -r "https://registry.internal.com/apps/${image_name}:latest" \
     -f "$tar_file" \
     -u "$REGISTRY_USER" \
     -p "$REGISTRY_PASS" \
-    -v
+    --output json | jq .
 done
 ```
 
-#### 大镜像优化上传
+## 🔧 配置
 
+### 环境变量
 ```bash
-# 针对大镜像调整参数
-docker-image-pusher \
-  -r https://registry.example.com/bigdata/spark:3.2.0 \
-  -f spark-3.2.0.tar \
-  -u username \
-  -p password \
-  --chunk-size 52428800 \    # 50MB 块大小
-  --concurrency 8 \          # 8 个并发连接
-  --timeout 1800 \           # 30 分钟超时
-  --retry 5                  # 重试 5 次
+# 通过环境变量设置凭据
+export DOCKER_PUSHER_USERNAME=myuser
+export DOCKER_PUSHER_PASSWORD=mypassword
+export DOCKER_PUSHER_VERBOSE=1
+export DOCKER_PUSHER_SKIP_TLS=1
+
+# 简化命令
+docker-image-pusher -r https://registry.com/app:v1.0 -f app.tar
 ```
 
-#### 干运行验证
+### 性能调优
 
+#### 网络优化设置
 ```bash
-# 验证配置但不实际上传
+# 适用于慢速/不稳定网络
 docker-image-pusher \
-  -r https://registry.example.com/test/app:v1.0 \
+  -r https://registry.com/app:latest \
   -f app.tar \
+  --chunk-size 2097152 \     # 2MB 块（更小）
+  --concurrency 2 \          # 更少的并行连接
+  --timeout 900 \            # 15 分钟超时
+  --retry 10                 # 更多重试
+```
+
+#### 高速网络设置
+```bash
+# 适用于快速、稳定网络
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f app.tar \
+  --chunk-size 104857600 \   # 100MB 块（更大）
+  --concurrency 16 \         # 更多并行连接
+  --timeout 300              # 标准超时
+```
+
+## 🏢 企业场景
+
+### 金融服务 - 空气隔离部署
+```bash
+# 在开发环境导出
+docker save trading-platform:v3.2.1 -o trading-platform-v3.2.1.tar
+
+# 通过安全介质传输到生产网络
+# 在生产环境部署
+docker-image-pusher \
+  -r https://prod-registry.bank.internal/trading/platform:v3.2.1 \
+  -f trading-platform-v3.2.1.tar \
+  -u prod-service \
+  -p "$(vault kv get -field=password secret/registry)" \
+  --skip-tls \
+  --registry-type harbor \
+  --verbose
+```
+
+### 制造业 - 边缘计算
+```bash
+# 部署到工厂边缘节点
+docker-image-pusher \
+  -r https://edge-registry.factory.com/iot/sensor-collector:v2.0 \
+  -f sensor-collector.tar \
+  -u edge-admin \
+  -p $EDGE_PASSWORD \
+  --chunk-size 5242880 \     # 5MB 适用于有限带宽
+  --timeout 1800 \           # 延长超时
+  --retry 15 \               # 高重试次数
+  --output json > deployment-log.json
+```
+
+## 🔍 故障排除
+
+### 常见问题和解决方案
+
+#### 身份验证失败
+```bash
+# 首先测试凭据
+docker-image-pusher \
+  -r https://registry.com/test/hello:v1 \
+  -f hello.tar \
   -u username \
   -p password \
   --dry-run \
   --verbose
 ```
 
-## 📋 命令行参数
-
-### 短参数对照表
-
-| 短参数 | 长参数 | 描述 | 示例 |
-|--------|--------|------|------|
-| `-r` | `--repository-url` | 完整的仓库URL（必需） | `https://harbor.com/project/app:v1.0` |
-| `-f` | `--file` | Docker镜像tar文件路径（必需） | `/path/to/image.tar` |
-| `-u` | `--username` | 仓库用户名 | `admin` |
-| `-p` | `--password` | 仓库密码 | `password123` |
-| `-c` | `--chunk-size` | 分块大小（字节） | `10485760` (10MB) |
-| `-j` | `--concurrency` | 并发连接数 | `4` |
-| `-k` | `--skip-tls` | 跳过TLS验证 | - |
-| `-v` | `--verbose` | 详细输出 | - |
-| `-t` | `--timeout` | 超时时间（秒） | `300` |
-| `-n` | `--dry-run` | 干运行模式 | - |
-| `-o` | `--output` | 输出格式 | `json`, `yaml`, `text` |
-
-### 环境变量支持
-
+#### 证书问题
 ```bash
-export DOCKER_PUSHER_USERNAME=myuser
-export DOCKER_PUSHER_PASSWORD=mypassword
-export DOCKER_PUSHER_VERBOSE=1
-export DOCKER_PUSHER_SKIP_TLS=1
-
-# 然后可以简化命令
-docker-image-pusher -r https://registry.com/app:v1.0 -f app.tar
-```
-
-## 🏢 企业级应用场景
-
-### 场景1：金融行业离线部署
-
-```bash
-# 在外网开发环境导出
-docker save trading-system:v2.1.0 -o trading-system-v2.1.0.tar
-
-# 通过安全审计后，在生产内网部署
+# 用于自签名证书
 docker-image-pusher \
-  -r https://prod-harbor.bank.com/trading/trading-system:v2.1.0 \
-  -f trading-system-v2.1.0.tar \
-  -u prod-admin \
-  -p "$(cat /secure/registry-password)" \
+  -r https://internal-registry.com/app:latest \
+  -f app.tar \
   --skip-tls \
   --verbose
 ```
 
-### 场景2：制造业边缘计算
-
+#### 大文件上传失败
 ```bash
-# 工厂边缘节点部署
+# 针对大文件优化
 docker-image-pusher \
-  -r https://edge-registry.factory.com/iot/sensor-collector:v1.5 \
-  -f sensor-collector-v1.5.tar \
-  -u edge-user \
-  -p edge-pass \
-  --chunk-size 5242880 \  # 网络条件差，使用小块
-  --timeout 1800 \        # 延长超时时间
-  --retry 10              # 增加重试次数
+  -r https://registry.com/bigapp:latest \
+  -f 20gb-image.tar \
+  --chunk-size 10485760 \    # 10MB 块
+  --concurrency 4 \          # 适中的并发数
+  --timeout 3600 \           # 1 小时超时
+  --retry 10 \               # 高重试次数
+  --verbose
 ```
 
-### 场景3：多云环境镜像迁移
+## 📊 输出格式
 
+### 用于自动化的 JSON 输出
 ```bash
-# 从 AWS ECR 迁移到阿里云 ACR
-docker-image-pusher \
-  -r https://registry.cn-hangzhou.aliyuncs.com/namespace/app:v1.0 \
-  -f app-from-aws.tar \
-  -u aliyun-username \
-  -p aliyun-password \
-  --output json | jq .    # JSON 格式输出便于脚本处理
+docker-image-pusher -r ... -f ... --output json | jq '
+{
+  status: .status,
+  uploaded_bytes: .uploaded_bytes,
+  total_bytes: .total_bytes,
+  duration_seconds: .duration_seconds
+}'
 ```
 
-## 🔍 故障排除
-
-### 常见问题
-
-#### 1. 认证失败
+### 用于 CI/CD 的 YAML 输出
 ```bash
-# 检查凭据和仓库权限
-docker-image-pusher -r https://registry.com/test/hello:v1 -f hello.tar -u user -p pass --dry-run -v
-```
-
-#### 2. 网络超时
-```bash
-# 增加超时时间和重试次数
-docker-image-pusher -r ... -f ... --timeout 1800 --retry 10
-```
-
-#### 3. TLS 证书问题
-```bash
-# 跳过 TLS 验证（仅限内网环境）
-docker-image-pusher -r ... -f ... --skip-tls
-```
-
-#### 4. 大文件上传失败
-```bash
-# 减小块大小，增加并发
-docker-image-pusher -r ... -f ... --chunk-size 2097152 --concurrency 2
+docker-image-pusher -r ... -f ... --output yaml > deployment-result.yaml
 ```
 
 ## 🤝 贡献
 
-欢迎贡献代码！请在 [GitHub 仓库](https://github.com/yorelog/docker-image-pusher) 中提交问题或拉取请求。
+我们欢迎贡献！请查看我们的 [贡献指南](CONTRIBUTING.md) 了解详情。
 
 ### 开发环境设置
-
 ```bash
 git clone https://github.com/yorelog/docker-image-pusher.git
 cd docker-image-pusher
@@ -244,18 +288,29 @@ cargo test
 cargo run -- --help
 ```
 
+### 运行测试
+```bash
+# 单元测试
+cargo test
+
+# 集成测试
+cargo test --test integration
+
+# 性能测试
+cargo test --release --test performance
+```
+
 ## 📄 许可证
 
-本项目采用 MIT 许可证。详情请参见 LICENSE 文件。
+本项目采用 MIT 许可证 - 详情请参见 [LICENSE](LICENSE) 文件。
 
-## 📞 支持
+## 🆘 支持
 
-如果您在使用过程中遇到问题，可以通过以下方式获取帮助：
-
-- 查看 [GitHub Issues](https://github.com/yorelog/docker-image-pusher/issues)
-- 提交新的 Issue
-- 查看文档和示例
+- 📖 [文档](https://github.com/yorelog/docker-image-pusher/wiki)
+- 🐛 [报告问题](https://github.com/yorelog/docker-image-pusher/issues)
+- 💬 [讨论](https://github.com/yorelog/docker-image-pusher/discussions)
+- 📧 邮箱: yorelog@gmail.com
 
 ---
 
-**注意**：在生产环境中使用时，请确保遵循您组织的安全策略和最佳实践。建议在测试环境中充分验证后再部署到生产环境。
+**⚠️ 安全提示**：在生产环境中务必使用安全的身份验证方法。建议使用环境变量或安全保险库存储凭据，而不是命令行参数。

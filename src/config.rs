@@ -1,130 +1,169 @@
-//! Configuration module for managing application settings and URL parsing
+//! Configuration structures and utilities
 
-use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::env;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegistryConfig {
-    pub url: String,
-    pub repository: String,
-    pub tag: String,
-    pub skip_tls: bool,
-}
+use crate::error::{Result, PusherError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    pub username: Option<String>,
-    pub password: Option<String>,
+    pub username: String,
+    pub password: String,
+}
+
+impl AuthConfig {
+    pub fn new(username: String, password: String) -> Self {
+        Self { username, password }
+    }
+
+    pub fn from_optional(username: Option<String>, password: Option<String>) -> Result<Self> {
+        match (username, password) {
+            (Some(u), Some(p)) => Ok(Self::new(u, p)),
+            (None, _) => Err(PusherError::Config("Username is required for authentication".to_string())),
+            (_, None) => Err(PusherError::Config("Password is required for authentication".to_string())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadConfig {
-    pub chunk_size: usize,
-    pub concurrency: usize,
-    pub verbose: bool,
+pub struct RegistryConfig {
+    pub address: String,
+    pub repository: String,
+    pub tag: String,
+    pub auth: Option<AuthConfig>,
+    pub skip_tls: bool,
+    pub timeout: u64,
+}
+
+impl RegistryConfig {
+    pub fn new(address: String, repository: String, tag: String) -> Self {
+        Self {
+            address,
+            repository,
+            tag,
+            auth: None,
+            skip_tls: false,
+            timeout: 7200, // 2 hours default
+        }
+    }
+
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    pub fn with_skip_tls(mut self, skip_tls: bool) -> Self {
+        self.skip_tls = skip_tls;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: u64) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub registry: RegistryConfig,
-    pub auth: AuthConfig,
-    pub upload: UploadConfig,
-    pub tar_file_path: String,
+    pub file_path: String,
+    pub large_layer_threshold: u64,
+    pub max_concurrent: usize,
+    pub retry_attempts: usize,
+    pub verbose: bool,
+    pub dry_run: bool,
 }
 
 impl AppConfig {
     pub fn new(
-        repository_url: String,
-        tar_file_path: String,
-        username: Option<String>,
-        password: Option<String>,
-        chunk_size: usize,
-        concurrency: usize,
-        skip_tls: bool,
-        verbose: bool,
+        registry_url: &str,
+        repository: &str,
+        tag: &str,
+        file_path: String,
     ) -> Result<Self> {
-        let registry = RegistryConfig::parse_url(&repository_url, skip_tls)?;
-        let auth = AuthConfig { username, password };
-        let upload = UploadConfig { chunk_size, concurrency, verbose };
+        let registry_config = RegistryConfig::new(
+            registry_url.to_string(),
+            repository.to_string(),
+            tag.to_string(),
+        );
 
-        Ok(AppConfig {
-            registry,
-            auth,
-            upload,
-            tar_file_path,
+        Ok(Self {
+            registry: registry_config,
+            file_path,
+            large_layer_threshold: 1024 * 1024 * 1024, // 1GB default
+            max_concurrent: 1,
+            retry_attempts: 3,
+            verbose: false,
+            dry_run: false,
         })
     }
 
-    pub fn has_auth(&self) -> bool {
-        self.auth.username.is_some() && self.auth.password.is_some()
+    pub fn with_auth(mut self, username: String, password: String) -> Self {
+        let auth = AuthConfig::new(username, password);
+        self.registry = self.registry.with_auth(auth);
+        self
     }
-}
 
-impl RegistryConfig {
-    pub fn parse_url(url: &str, skip_tls: bool) -> Result<Self> {
-        // Parse URL
-        let (protocol, remaining) = if let Some(pos) = url.find("://") {
-            (&url[..pos + 3], &url[pos + 3..])
-        } else {
-            ("https://", url)
-        };
+    pub fn with_optional_auth(mut self, username: Option<String>, password: Option<String>) -> Result<Self> {
+        if let (Some(u), Some(p)) = (username, password) {
+            self = self.with_auth(u, p);
+        }
+        Ok(self)
+    }
 
-        let (host, path) = if let Some(pos) = remaining.find('/') {
-            (&remaining[..pos], &remaining[pos + 1..])
-        } else {
-            return Err(anyhow!("Invalid repository URL format. Expected: https://registry/project/repo:tag"));
-        };
+    pub fn has_auth(&self) -> bool {
+        self.registry.auth.is_some()
+    }
 
-        let registry_url = format!("{}{}", protocol, host);
+    pub fn with_large_layer_threshold(mut self, threshold: u64) -> Self {
+        self.large_layer_threshold = threshold;
+        self
+    }
 
+    pub fn with_timeout(mut self, timeout: u64) -> Self {
+        self.registry = self.registry.with_timeout(timeout);
+        self
+    }
+
+    pub fn with_skip_tls(mut self, skip_tls: bool) -> Self {
+        self.registry = self.registry.with_skip_tls(skip_tls);
+        self
+    }
+
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
+        self.max_concurrent = max_concurrent;
+        self
+    }
+
+    pub fn with_retry_attempts(mut self, retry_attempts: usize) -> Self {
+        self.retry_attempts = retry_attempts;
+        self
+    }
+
+    pub fn parse_repository_url(url: &str) -> Result<(String, String, String)> {
+        let parsed_url = url::Url::parse(url)
+            .map_err(|e| PusherError::Config(format!("Invalid repository URL: {}", e)))?;
+
+        let registry_address = format!("{}://{}", 
+            parsed_url.scheme(), 
+            parsed_url.host_str().unwrap_or("localhost"));
+
+        let path = parsed_url.path().trim_start_matches('/');
         let (repository, tag) = if let Some(colon_pos) = path.rfind(':') {
-            (&path[..colon_pos], &path[colon_pos + 1..])
+            let (repo, tag_part) = path.split_at(colon_pos);
+            (repo, &tag_part[1..]) // Remove the ':' prefix
         } else {
             (path, "latest")
         };
 
-        if repository.is_empty() {
-            return Err(anyhow!("Repository name cannot be empty"));
-        }
-
-        Ok(RegistryConfig {
-            url: registry_url,
-            repository: repository.to_string(),
-            tag: tag.to_string(),
-            skip_tls,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct Config {
-    pub registry_address: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub project: Option<String>,
-    pub skip_tls: bool,
-    pub chunk_size: usize,
-}
-
-impl Config {
-    pub fn new() -> Result<Self, &'static str> {
-        let registry_address = env::var("REGISTRY_ADDRESS").map_err(|_| "REGISTRY_ADDRESS not set")?;
-        let username = env::var("REGISTRY_USERNAME").ok();
-        let password = env::var("REGISTRY_PASSWORD").ok();
-        let project = env::var("REGISTRY_PROJECT").ok();
-        let skip_tls = env::var("SKIP_TLS").map_or(false, |v| v == "true");
-        let chunk_size = env::var("CHUNK_SIZE")
-            .map(|v| v.parse::<usize>().unwrap_or(1048576)) // Default to 1MB
-            .unwrap_or(1048576); // Default to 1MB
-
-        Ok(Config {
-            registry_address,
-            username,
-            password,
-            project,
-            skip_tls,
-            chunk_size,
-        })
+        Ok((registry_address, repository.to_string(), tag.to_string()))
     }
 }

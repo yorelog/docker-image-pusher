@@ -1,249 +1,267 @@
-//! Command-line argument parsing
+//! Command line argument parsing and validation
 
+use crate::error::{Result, PusherError};
 use clap::Parser;
+use std::path::Path;
 
-#[derive(Parser)]
-#[command(name = "docker-image-pusher")]
-#[command(about = "A tool to push Docker image tar packages to registries")]
-#[command(version, author)]
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "docker-image-pusher",
+    version = "0.1.1",
+    about = "Push Docker images to registries with optimized large layer handling",
+    long_about = None
+)]
 pub struct Args {
-    /// Repository URL
-    #[arg(
-        long = "repository-url",
-        short = 'r',
-        help = "Full repository URL including registry, project, and tag"
-    )]
-    pub repository_url: String,
-
     /// Path to the Docker image tar file
-    #[arg(
-        long = "file",
-        short = 'f',
-        help = "Path to the Docker image tar file"
-    )]
+    #[arg(short, long, value_name = "FILE")]
     pub file: String,
 
+    /// Repository URL (e.g., https://registry.example.com/my-app:latest)
+    #[arg(short, long, value_name = "URL")]
+    pub repository_url: String,
+
     /// Registry username
-    #[arg(
-        long = "username",
-        short = 'u',
-        help = "Username for registry authentication"
-    )]
+    #[arg(short, long)]
     pub username: Option<String>,
 
     /// Registry password
-    #[arg(
-        long = "password",
-        short = 'p',
-        help = "Password for registry authentication"
-    )]
+    #[arg(short, long)]
     pub password: Option<String>,
 
-    /// Chunk size for upload (default: 10MB)
-    #[arg(
-        long = "chunk-size",
-        short = 'c',
-        default_value = "10485760",
-        help = "Chunk size for upload in bytes"
-    )]
-    pub chunk_size: usize,
-
-    /// Number of concurrent uploads
-    #[arg(
-        long = "concurrency",
-        short = 'j',
-        default_value = "4",
-        help = "Number of concurrent upload workers"
-    )]
-    pub concurrency: usize,
-
-    /// Skip TLS verification
-    #[arg(
-        long = "skip-tls",
-        short = 'k',
-        default_value = "false",
-        help = "Skip TLS certificate verification"
-    )]
-    pub skip_tls: bool,
-
-    /// Verbose output
-    #[arg(
-        long = "verbose",
-        short = 'v',
-        help = "Enable verbose output"
-    )]
-    pub verbose: bool,
-
-    /// Timeout in seconds for network operations
-    #[arg(
-        long = "timeout",
-        short = 't',
-        default_value = "300",
-        help = "Timeout for network operations in seconds"
-    )]
+    /// Timeout in seconds for uploads (default: 7200)
+    #[arg(short = 't', long, default_value = "7200")]
     pub timeout: u64,
 
-    /// Retry attempts for failed operations
-    #[arg(
-        long = "retry",
-        default_value = "3",
-        help = "Number of retry attempts for failed operations"
-    )]
-    pub retry: usize,
+    /// Skip TLS certificate verification
+    #[arg(long)]
+    pub skip_tls: bool,
 
-    /// Registry type (docker, harbor, etc.)
-    #[arg(
-        long = "registry-type",
-        default_value = "auto",
-        help = "Registry type: auto, docker, harbor, aws, gcp, azure"
-    )]
-    pub registry_type: String,
+    /// Enable verbose output
+    #[arg(short, long)]
+    pub verbose: bool,
 
-    /// Force overwrite existing image
-    #[arg(
-        long = "force",
-        help = "Force overwrite existing image"
-    )]
-    pub force: bool,
+    /// Suppress all output except errors
+    #[arg(short, long)]
+    pub quiet: bool,
 
-    /// Dry run mode (validate without uploading)
-    #[arg(
-        long = "dry-run",
-        short = 'n',
-        help = "Perform a dry run without actually uploading"
-    )]
+    /// Perform a dry run without actually uploading
+    #[arg(long)]
     pub dry_run: bool,
 
-    /// Output format for results
-    #[arg(
-        long = "output",
-        short = 'o',
-        default_value = "text",
-        help = "Output format: text, json, yaml"
-    )]
-    pub output: String,
+    /// Threshold for large layer optimization in bytes (default: 1GB)
+    #[arg(long, default_value = "1073741824")]
+    pub large_layer_threshold: u64,
 
-    /// Configuration file path
-    #[arg(
-        long = "config",
-        help = "Path to configuration file"
-    )]
-    pub config: Option<String>,
+    /// Maximum concurrent uploads (default: 1)
+    #[arg(long, default_value = "1")]
+    pub max_concurrent: usize,
+
+    /// Number of retry attempts for failed uploads (default: 3)
+    #[arg(long, default_value = "3")]
+    pub retry_attempts: usize,
 }
 
 impl Args {
-    pub fn parse_args() -> Self {
-        Args::parse()
+    /// Parse command line arguments using clap
+    /// This will exit the process if parsing fails (clap's default behavior)
+    pub fn parse() -> Self {
+        <Self as Parser>::parse()
     }
 
-    /// Validate arguments
-    pub fn validate(&self) -> Result<(), String> {
-        // Validate file exists
-        if !std::path::Path::new(&self.file).exists() {
-            return Err(format!("File does not exist: {}", self.file));
+    /// Try to parse command line arguments, returning a Result
+    /// Use this when you want to handle parsing errors yourself
+    pub fn try_parse() -> Result<Self> {
+        <Self as Parser>::try_parse()
+            .map_err(|e| PusherError::Validation(format!("Failed to parse arguments: {}", e)))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        // Validate file path
+        let file_path = Path::new(&self.file);
+        if !file_path.exists() {
+            return Err(PusherError::Validation(format!(
+                "Input file does not exist: {}", 
+                self.file
+            )));
         }
 
-        // Validate repository URL format
-        if !self.repository_url.starts_with("http://") && !self.repository_url.starts_with("https://") {
-            return Err("Repository URL must start with http:// or https://".to_string());
+        if !file_path.is_file() {
+            return Err(PusherError::Validation(format!(
+                "Input path is not a file: {}", 
+                self.file
+            )));
         }
 
-        // Validate chunk size
-        if self.chunk_size == 0 {
-            return Err("Chunk size must be greater than 0".to_string());
+        // Check file extension
+        let extension = file_path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("");
+        
+        if !matches!(extension.to_lowercase().as_str(), "tar" | "tar.gz" | "tgz") {
+            return Err(PusherError::Validation(format!(
+                "Input file must be a tar archive (.tar, .tar.gz, or .tgz): {}", 
+                self.file
+            )));
         }
 
-        // Validate concurrency
-        if self.concurrency == 0 {
-            return Err("Concurrency must be greater than 0".to_string());
+        // Validate repository URL
+        if self.repository_url.is_empty() {
+            return Err(PusherError::Validation(
+                "Repository URL cannot be empty".to_string()
+            ));
+        }
+
+        // Basic URL format validation
+        if !self.repository_url.contains("://") {
+            return Err(PusherError::Validation(
+                "Repository URL must include protocol (http:// or https://)".to_string()
+            ));
         }
 
         // Validate timeout
         if self.timeout == 0 {
-            return Err("Timeout must be greater than 0".to_string());
+            return Err(PusherError::Validation(
+                "Timeout must be greater than 0".to_string()
+            ));
         }
 
-        // Validate output format
-        match self.output.as_str() {
-            "text" | "json" | "yaml" => {}
-            _ => return Err("Output format must be one of: text, json, yaml".to_string()),
+        if self.timeout > 86400 { // 24 hours
+            return Err(PusherError::Validation(
+                "Timeout cannot exceed 24 hours (86400 seconds)".to_string()
+            ));
         }
 
-        // Validate registry type
-        match self.registry_type.as_str() {
-            "auto" | "docker" | "harbor" | "aws" | "gcp" | "azure" => {}
-            _ => return Err("Registry type must be one of: auto, docker, harbor, aws, gcp, azure".to_string()),
+        // Validate large layer threshold
+        if self.large_layer_threshold == 0 {
+            return Err(PusherError::Validation(
+                "Large layer threshold must be greater than 0".to_string()
+            ));
+        }
+
+        // Validate max concurrent
+        if self.max_concurrent == 0 {
+            return Err(PusherError::Validation(
+                "Max concurrent uploads must be at least 1".to_string()
+            ));
+        }
+
+        if self.max_concurrent > 10 {
+            return Err(PusherError::Validation(
+                "Max concurrent uploads cannot exceed 10".to_string()
+            ));
+        }
+
+        // Validate retry attempts
+        if self.retry_attempts > 10 {
+            return Err(PusherError::Validation(
+                "Retry attempts cannot exceed 10".to_string()
+            ));
+        }
+
+        // Validate credentials consistency
+        match (&self.username, &self.password) {
+            (Some(_), None) => {
+                return Err(PusherError::Validation(
+                    "Password is required when username is provided".to_string()
+                ));
+            },
+            (None, Some(_)) => {
+                return Err(PusherError::Validation(
+                    "Username is required when password is provided".to_string()
+                ));
+            },
+            _ => {} // Both provided or both None is fine
+        }
+
+        // Validate mutually exclusive flags
+        if self.verbose && self.quiet {
+            return Err(PusherError::Validation(
+                "Cannot specify both --verbose and --quiet flags".to_string()
+            ));
         }
 
         Ok(())
     }
 
-    /// Print usage examples
-    pub fn print_examples() {
-        println!("Examples:");
-        println!("  # Basic usage with short options");
-        println!("  docker-image-pusher -r https://registry.example.com/myproject/myimage:v1.0 -f image.tar");
-        println!();
-        println!("  # With authentication using short options");
-        println!("  docker-image-pusher -r https://harbor.example.com/project/app:latest \\");
-        println!("                      -f app.tar -u myuser -p mypassword");
-        println!();
-        println!("  # With custom settings using long options");
-        println!("  docker-image-pusher --repository-url https://registry.example.com/project/app:v2.0 \\");
-        println!("                      --file app.tar --username admin --password secret \\");
-        println!("                      --chunk-size 5242880 --concurrency 8 --verbose");
-        println!();
-        println!("  # Dry run to validate without uploading");
-        println!("  docker-image-pusher -r https://registry.example.com/test/app:latest \\");
-        println!("                      -f test.tar --dry-run --verbose");
-        println!();
-        println!("  # Skip TLS verification for self-signed certificates");
-        println!("  docker-image-pusher -r https://internal-registry.com/app:latest \\");
-        println!("                      -f app.tar -u user -p pass --skip-tls");
-        println!();
-        println!("  # Using environment variables for sensitive data");
-        println!("  export DOCKER_PUSHER_USERNAME=myuser");
-        println!("  export DOCKER_PUSHER_PASSWORD=mypassword");
-        println!("  docker-image-pusher -r https://registry.example.com/app:latest -f app.tar");
+    pub fn get_file_size(&self) -> Result<u64> {
+        let metadata = std::fs::metadata(&self.file)
+            .map_err(|e| PusherError::Io(format!("Failed to read file metadata: {}", e)))?;
+        Ok(metadata.len())
     }
 
-    /// Load configuration from environment variables
-    pub fn from_env(mut self) -> Self {
-        if self.username.is_none() {
-            self.username = std::env::var("DOCKER_PUSHER_USERNAME").ok();
-        }
-        
-        if self.password.is_none() {
-            self.password = std::env::var("DOCKER_PUSHER_PASSWORD").ok();
-        }
+    pub fn has_credentials(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
+    }
 
-        // Override with environment variables if present
-        if let Ok(timeout) = std::env::var("DOCKER_PUSHER_TIMEOUT") {
-            if let Ok(t) = timeout.parse() {
-                self.timeout = t;
-            }
+    pub fn get_credentials(&self) -> Option<(String, String)> {
+        match (&self.username, &self.password) {
+            (Some(u), Some(p)) => Some((u.clone(), p.clone())),
+            _ => None,
         }
+    }
+}
 
-        if let Ok(chunk_size) = std::env::var("DOCKER_PUSHER_CHUNK_SIZE") {
-            if let Ok(c) = chunk_size.parse() {
-                self.chunk_size = c;
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        if let Ok(concurrency) = std::env::var("DOCKER_PUSHER_CONCURRENCY") {
-            if let Ok(c) = concurrency.parse() {
-                self.concurrency = c;
-            }
-        }
+    #[test]
+    fn test_validation_missing_file() {
+        let args = Args {
+            file: "nonexistent.tar".to_string(),
+            repository_url: "https://registry.example.com/test:latest".to_string(),
+            username: None,
+            password: None,
+            timeout: 7200,
+            skip_tls: false,
+            verbose: false,
+            quiet: false,
+            dry_run: false,
+            large_layer_threshold: 1073741824,
+            max_concurrent: 1,
+            retry_attempts: 3,
+        };
 
-        if std::env::var("DOCKER_PUSHER_VERBOSE").is_ok() {
-            self.verbose = true;
-        }
+        assert!(args.validate().is_err());
+    }
 
-        if std::env::var("DOCKER_PUSHER_SKIP_TLS").is_ok() {
-            self.skip_tls = true;
-        }
+    #[test]
+    fn test_validation_invalid_url() {
+        let args = Args {
+            file: "test.tar".to_string(),
+            repository_url: "invalid-url".to_string(),
+            username: None,
+            password: None,
+            timeout: 7200,
+            skip_tls: false,
+            verbose: false,
+            quiet: false,
+            dry_run: false,
+            large_layer_threshold: 1073741824,
+            max_concurrent: 1,
+            retry_attempts: 3,
+        };
 
-        self
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_credentials_mismatch() {
+        let args = Args {
+            file: "test.tar".to_string(),
+            repository_url: "https://registry.example.com/test:latest".to_string(),
+            username: Some("user".to_string()),
+            password: None, // Missing password
+            timeout: 7200,
+            skip_tls: false,
+            verbose: false,
+            quiet: false,
+            dry_run: false,
+            large_layer_threshold: 1073741824,
+            max_concurrent: 1,
+            retry_attempts: 3,
+        };
+
+        assert!(args.validate().is_err());
     }
 }

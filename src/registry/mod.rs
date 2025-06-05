@@ -1,7 +1,8 @@
-// This file defines the registry module for handling Docker registry communication.
+//! Registry module for Docker registry interactions
 
-pub mod auth;
 pub mod client;
+pub mod auth;
 
-pub use auth::{Auth, AuthChallenge};
-pub use client::RegistryClient;
+pub use auth::Auth;
+pub use client::{RegistryClient, RegistryClientBuilder};
+pub use crate::config::AuthConfig;  // Make sure this is exported from registry module

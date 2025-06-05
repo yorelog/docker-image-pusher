@@ -1,219 +1,199 @@
 //! Authentication module for Docker registry access
 
 use crate::error::{Result, PusherError};
-use reqwest::{Client, header::{AUTHORIZATION, WWW_AUTHENTICATE}};
-use serde::Deserialize;
-use base64::{Engine as _, engine::general_purpose};
+use crate::output::OutputManager;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-#[derive(Deserialize, Debug)]
-struct AuthResponse {
+#[derive(Debug, Deserialize)]
+struct AuthChallenge {
+    realm: String,
+    service: String,
+    scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
     token: Option<String>,
     access_token: Option<String>,
+    // Note: expires_in is part of the API response but not currently used
+    #[allow(dead_code)]
+    expires_in: Option<u64>,
+}
+
+// Note: LoginRequest might be used for future password-based auth
+#[allow(dead_code)]
+#[derive(Debug, Serialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
 }
 
 #[derive(Debug)]
-pub struct AuthChallenge {
-    pub realm: String,
-    pub service: String,
-    pub scope: Option<String>,
-}
-
-impl AuthChallenge {
-    pub fn parse(auth_header: &str) -> Result<Self> {
-        let mut realm = String::new();
-        let mut service = String::new();
-        let mut scope = None;
-
-        if auth_header.starts_with("Bearer ") {
-            let params = &auth_header[7..]; // Remove "Bearer "
-            for param in params.split(',') {
-                let param = param.trim();
-                if let Some((key, value)) = param.split_once('=') {
-                    let value = value.trim_matches('"');
-                    match key {
-                        "realm" => realm = value.to_string(),
-                        "service" => service = value.to_string(),
-                        "scope" => scope = Some(value.to_string()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        if realm.is_empty() || service.is_empty() {
-            return Err(PusherError::Authentication("Invalid auth challenge format".to_string()));
-        }
-
-        Ok(AuthChallenge { realm, service, scope })
-    }
-}
-
 pub struct Auth {
     client: Client,
-    registry_url: String,
+    registry_address: String,
+    // Note: auth_endpoint might be used for future enhanced auth flows
+    #[allow(dead_code)]
+    auth_endpoint: Option<String>,
 }
 
 impl Auth {
-    pub fn new(registry_url: &str, skip_tls: bool) -> Result<Self> {
+    pub fn new(registry_address: &str, skip_tls: bool) -> Result<Self> {
         let client = if skip_tls {
             Client::builder()
                 .danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true)
                 .build()
-                .map_err(PusherError::Network)?
         } else {
-            Client::new()
-        };
+            Client::builder().build()
+        }
+        .map_err(|e| PusherError::Network(format!("Failed to create auth client: {}", e)))?;
 
-        Ok(Auth {
+        Ok(Self {
             client,
-            registry_url: registry_url.to_string(),
+            registry_address: registry_address.to_string(),
+            auth_endpoint: None,
         })
     }
 
-    pub async fn get_auth_challenge(&self) -> Result<Option<AuthChallenge>> {
-        let url = format!("{}/v2/", self.registry_url);
-        println!("  Getting auth challenge from: {}", url);
+    pub async fn login(&self, username: &str, password: &str, output: &OutputManager) -> Result<Option<String>> {
+        output.verbose(&format!("Attempting authentication for user: {}", username));
+
+        // First, try to get auth challenge from registry
+        let auth_challenge = self.get_auth_challenge(output).await?;
         
-        let response = self.client.get(&url).send().await?;
-        println!("  Auth challenge response status: {}", response.status());
+        if let Some(challenge) = auth_challenge {
+            output.verbose(&format!("Auth challenge received: realm={}, service={}", 
+                         challenge.realm, challenge.service));
+
+            // Get token from auth server
+            let token = self.get_token(&challenge, username, password, output).await?;
+            
+            if token.is_some() {
+                output.success("Authentication token obtained successfully");
+            } else {
+                output.info("No token required for this registry");
+            }
+            
+            Ok(token)
+        } else {
+            output.info("No authentication challenge - registry may not require auth");
+            Ok(None)
+        }
+    }
+
+    async fn get_auth_challenge(&self, output: &OutputManager) -> Result<Option<AuthChallenge>> {
+        output.detail("Sending auth challenge request to registry");
         
+        let url = format!("{}/v2/", self.registry_address);
+        let response = self.client.get(&url).send().await
+            .map_err(|e| PusherError::Network(format!("Failed to get auth challenge: {}", e)))?;
+
+        output.detail(&format!("Auth challenge response status: {}", response.status()));
+
         if response.status() == 401 {
-            if let Some(auth_header) = response.headers().get(WWW_AUTHENTICATE) {
+            if let Some(auth_header) = response.headers().get("www-authenticate") {
                 let auth_str = auth_header.to_str()
-                    .map_err(|e| PusherError::Authentication(format!("Invalid auth header: {}", e)))?;
-                println!("  WWW-Authenticate header: {}", auth_str);
-                return Ok(Some(AuthChallenge::parse(auth_str)?));
+                    .map_err(|e| PusherError::Parse(format!("Invalid auth header: {}", e)))?;
+                
+                output.detail(&format!("Parsing auth header: {}", auth_str));
+                return self.parse_auth_challenge(auth_str, output);
             }
         }
-        
+
         Ok(None)
     }
 
-    pub async fn get_token_for_repository(
-        &self,
-        challenge: &AuthChallenge,
-        username: &str,
-        password: &str,
-        repository: &str,
-    ) -> Result<String> {
-        let credentials = general_purpose::STANDARD.encode(format!("{}:{}", username, password));
-        
-        // For Harbor, we need the exact repository scope with push permission
-        let scope = format!("repository:{}:pull,push", repository);
-        let query_params = vec![
-            ("service", challenge.service.as_str()),
-            ("scope", scope.as_str()),
-        ];
-        
-        println!("  Token request to: {}", challenge.realm);
-        println!("  Service: {}", challenge.service);
-        println!("  Scope: {}", scope);
-        println!("  Username: {}", username);
-        
-        self.request_token(&challenge.realm, &credentials, &query_params).await
-    }
-
-    pub async fn get_token(
-        &self,
-        challenge: &AuthChallenge,
-        username: &str,
-        password: &str,
-        repository: Option<&str>,
-    ) -> Result<String> {
-        let credentials = general_purpose::STANDARD.encode(format!("{}:{}", username, password));
-        
-        let mut query_params = vec![("service", challenge.service.as_str())];
-        
-        // Build scope for Harbor
-        let scope_value = if let Some(repo) = repository {
-            format!("repository:{}:pull,push", repo)
-        } else {
-            String::new()
-        };
-        
-        if !scope_value.is_empty() {
-            query_params.push(("scope", scope_value.as_str()));
-            println!("  Token request to: {}", challenge.realm);
-            println!("  Service: {}", challenge.service);
-            println!("  Scope: {}", scope_value);
-            println!("  Username: {}", username);
+    fn parse_auth_challenge(&self, auth_header: &str, output: &OutputManager) -> Result<Option<AuthChallenge>> {
+        // Parse Bearer challenge: Bearer realm="...",service="...",scope="..."
+        if !auth_header.starts_with("Bearer ") {
+            output.debug("Auth header is not Bearer type");
+            return Ok(None);
         }
-        
-        match self.request_token(&challenge.realm, &credentials, &query_params).await {
-            Ok(token) => Ok(token),
-            Err(e) => {
-                println!("  Token request failed: {}", e);
-                // Retry without scope if failed
-                if !scope_value.is_empty() {
-                    println!("  Retrying without scope...");
-                    let basic_params = vec![("service", challenge.service.as_str())];
-                    self.request_token(&challenge.realm, &credentials, &basic_params).await
-                } else {
-                    Err(PusherError::Authentication("Token request failed".to_string()))
-                }
+
+        let params_str = &auth_header[7..]; // Remove "Bearer "
+        let mut params = HashMap::new();
+
+        for param in params_str.split(',') {
+            let param = param.trim();
+            if let Some(eq_pos) = param.find('=') {
+                let key = param[..eq_pos].trim();
+                let value = param[eq_pos + 1..].trim().trim_matches('"');
+                params.insert(key, value);
             }
         }
+
+        if let Some(realm) = params.get("realm") {
+            let service = params.get("service").unwrap_or(&"").to_string();
+            let scope = params.get("scope").map(|s| s.to_string());
+
+            output.detail(&format!("Parsed auth challenge - realm: {}, service: {}, scope: {:?}", 
+                realm, service, scope));
+
+            Ok(Some(AuthChallenge {
+                realm: realm.to_string(),
+                service,
+                scope,
+            }))
+        } else {
+            output.warning("Auth header missing realm parameter");
+            Ok(None)
+        }
     }
 
-    async fn request_token(
-        &self,
-        realm: &str,
-        credentials: &str,
-        query_params: &[(&str, &str)],
-    ) -> Result<String> {
-        let response = self.client
-            .get(realm)
-            .header(AUTHORIZATION, format!("Basic {}", credentials))
-            .query(query_params)
-            .send()
-            .await?;
+    async fn get_token(&self, challenge: &AuthChallenge, username: &str, password: &str, output: &OutputManager) -> Result<Option<String>> {
+        let mut url = format!("{}?service={}", challenge.realm, challenge.service);
+        
+        if let Some(scope) = &challenge.scope {
+            url.push_str(&format!("&scope={}", scope));
+        }
 
-        println!("  Token response status: {}", response.status());
+        output.detail(&format!("Requesting token from: {}", url));
+
+        let response = self.client
+            .get(&url)
+            .basic_auth(username, Some(password))
+            .send()
+            .await
+            .map_err(|e| PusherError::Network(format!("Failed to get auth token: {}", e)))?;
 
         if response.status().is_success() {
-            let response_text = response.text().await?;
-            println!("  Token response body: {}", response_text);
+            output.detail("Token request successful, parsing response");
             
-            let auth_response: AuthResponse = serde_json::from_str(&response_text)
-                .map_err(|e| PusherError::Authentication(format!("Failed to parse token response: {}", e)))?;
+            let token_response: TokenResponse = response.json().await
+                .map_err(|e| PusherError::Parse(format!("Failed to parse token response: {}", e)))?;
+
+            let token = token_response.token.or(token_response.access_token);
             
-            let token = auth_response.token
-                .or(auth_response.access_token)
-                .ok_or_else(|| PusherError::Authentication("No token in response".to_string()))?;
-            
-            println!("  Token received successfully");
+            if let Some(ref token) = token {
+                output.detail(&format!("Token obtained (length: {} chars)", token.len()));
+                
+                // Log expiration info if available
+                if let Some(expires_in) = token_response.expires_in {
+                    output.detail(&format!("Token expires in {} seconds", expires_in));
+                }
+            }
+
             Ok(token)
         } else {
-            let error_text = response.text().await?;
-            println!("  Token request failed with body: {}", error_text);
-            Err(PusherError::Authentication(format!("Token request failed: {}", error_text)))
+            let status = response.status();
+            let error_text = response.text().await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
+            
+            output.error(&format!("Token request failed with status {}: {}", status, error_text));
+            
+            Err(PusherError::Authentication(format!(
+                "Authentication failed with status: {}", 
+                status
+            )))
         }
     }
 
-    pub async fn login(&self, username: &str, password: &str) -> Result<Option<String>> {
-        if let Some(challenge) = self.get_auth_challenge().await? {
-            println!("Auth challenge received from registry:");
-            println!("  Realm: {}", challenge.realm);
-            println!("  Service: {}", challenge.service);
-            if let Some(scope) = &challenge.scope {
-                println!("  Scope: {}", scope);
-            }
-            let token = self.get_token(&challenge, username, password, None).await?;
-            Ok(Some(token))
-        } else {
-            println!("No auth challenge - registry may not require authentication");
-            Ok(None)
-        }
-    }
-
-    pub async fn login_with_repository(&self, username: &str, password: &str, repository: &str) -> Result<Option<String>> {
-        if let Some(challenge) = self.get_auth_challenge().await? {
-            println!("Getting repository-specific token for: {}", repository);
-            let token = self.get_token_for_repository(&challenge, username, password, repository).await?;
-            Ok(Some(token))
-        } else {
-            Ok(None)
-        }
+    // Future method for enhanced authentication flows
+    #[allow(dead_code)]
+    pub fn set_auth_endpoint(&mut self, endpoint: String) {
+        self.auth_endpoint = Some(endpoint);
     }
 }

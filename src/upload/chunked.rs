@@ -1,51 +1,159 @@
-// This file implements the ChunkedUploader struct for handling chunked uploads of Docker image tar packages to a registry.
+//! Optimized upload implementation for large files
 
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
-
-const CHUNK_SIZE: usize = 5 * 1024 * 1024; // 5 MB chunks
+use crate::error::{Result, PusherError};
+use crate::output::OutputManager;
+use reqwest::{Client, header::CONTENT_TYPE};
+use std::time::Duration;
+use tokio::time::sleep;
 
 pub struct ChunkedUploader {
-    file: File,
-    total_size: u64,
-    uploaded_size: u64,
+    client: Client,
+    max_retries: usize,
+    retry_delay: Duration,
+    timeout: Duration,
+    output: OutputManager,
 }
 
 impl ChunkedUploader {
-    pub fn new<P: AsRef<Path>>(file_path: P) -> io::Result<Self> {
-        let file = File::open(file_path)?;
-        let total_size = file.metadata()?.len();
-        Ok(ChunkedUploader {
-            file,
-            total_size,
-            uploaded_size: 0,
-        })
-    }
+    pub fn new(timeout_seconds: u64, output: OutputManager) -> Self {
+        // Build HTTP client with optimized settings for large uploads
+        let client = Client::builder()
+            .timeout(Duration::from_secs(timeout_seconds))
+            .connect_timeout(Duration::from_secs(60))
+            .read_timeout(Duration::from_secs(3600))
+            .pool_idle_timeout(Duration::from_secs(300))
+            .pool_max_idle_per_host(10)
+            .user_agent("docker-image-pusher/1.0")
+            .build()
+            .expect("Failed to build HTTP client");
 
-    pub fn upload_chunk(&mut self) -> io::Result<usize> {
-        let mut buffer = vec![0; CHUNK_SIZE];
-        self.file.seek(SeekFrom::Start(self.uploaded_size))?;
-        let bytes_read = self.file.read(&mut buffer)?;
-
-        if bytes_read > 0 {
-            // Here you would implement the logic to upload the chunk to the registry.
-            // For example, sending the buffer to the registry API.
-            self.uploaded_size += bytes_read as u64;
+        Self {
+            client,
+            max_retries: 3,
+            retry_delay: Duration::from_secs(10),
+            timeout: Duration::from_secs(timeout_seconds),
+            output,
         }
-
-        Ok(bytes_read)
     }
 
-    pub fn total_size(&self) -> u64 {
-        self.total_size
+    pub async fn upload_large_blob(
+        &self,
+        upload_url: &str,
+        data: &[u8],
+        digest: &str,
+        token: &Option<String>,
+    ) -> Result<()> {
+        let data_size = data.len() as u64;
+        
+        self.output.step(&format!("Starting chunked upload for {} ({})", 
+            &digest[..16], self.output.format_size(data_size)));
+        
+        for attempt in 1..=self.max_retries {
+            self.output.detail(&format!("Chunked upload attempt {} of {}", attempt, self.max_retries));
+            
+            match self.try_upload(upload_url, data, digest, token).await {
+                Ok(_) => {
+                    self.output.success(&format!("Chunked upload completed successfully on attempt {}", attempt));
+                    return Ok(());
+                }
+                Err(e) if attempt < self.max_retries => {
+                    self.output.warning(&format!("Chunked attempt {} failed: {}", attempt, e));
+                    self.output.info(&format!("Waiting {}s before retry...", self.retry_delay.as_secs()));
+                    sleep(self.retry_delay).await;
+                }
+                Err(e) => {
+                    self.output.error(&format!("All {} chunked attempts failed. Last error: {}", self.max_retries, e));
+                    return Err(e);
+                }
+            }
+        }
+        
+        Err(PusherError::Upload("All chunked upload attempts failed".to_string()))
     }
 
-    pub fn uploaded_size(&self) -> u64 {
-        self.uploaded_size
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.uploaded_size >= self.total_size
+    async fn try_upload(
+        &self,
+        upload_url: &str,
+        data: &[u8],
+        digest: &str,
+        token: &Option<String>,
+    ) -> Result<()> {
+        let data_size = data.len() as u64;
+        
+        let url = format!("{}digest={}", 
+            if upload_url.contains('?') { format!("{}&", upload_url) } else { format!("{}?", upload_url) },
+            digest
+        );
+        
+        self.output.detail(&format!("Upload URL: {}", url));
+        self.output.detail(&format!("Upload size: {}", self.output.format_size(data_size)));
+        
+        let mut request = self.client
+            .put(&url)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header("Content-Length", data_size.to_string())
+            .timeout(self.timeout)
+            .body(data.to_vec());
+        
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+            self.output.detail("Using authentication token");
+        } else {
+            self.output.detail("No authentication token");
+        }
+        
+        let start_time = std::time::Instant::now();
+        self.output.progress(&format!("Uploading {}", self.output.format_size(data_size)));
+        
+        let response = request.send().await
+            .map_err(|e| {
+                self.output.error(&format!("Network error during chunked upload: {}", e));
+                
+                if e.is_timeout() {
+                    PusherError::Upload(format!("Chunked upload timeout after {}s", self.timeout.as_secs()))
+                } else if e.is_connect() {
+                    PusherError::Network(e.to_string())
+                } else if e.to_string().contains("dns") {
+                    PusherError::Network(e.to_string())
+                } else if e.to_string().contains("certificate") {
+                    PusherError::Network(e.to_string())
+                } else {
+                    PusherError::Network(e.to_string())
+                }
+            })?;
+        
+        let elapsed = start_time.elapsed();
+        let speed = if elapsed.as_secs() > 0 {
+            data_size / elapsed.as_secs()
+        } else {
+            data_size
+        };
+        
+        self.output.progress_done();
+        self.output.info(&format!("Upload completed in {} (avg speed: {})", 
+                 self.output.format_duration(elapsed), self.output.format_size(speed)));
+        
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let error_text = response.text().await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
+            
+            let error_msg = match status.as_u16() {
+                400 => format!("Bad request: {}", error_text),
+                401 => format!("Authentication failed: {}", error_text),
+                403 => format!("Permission denied: {}", error_text),
+                404 => format!("Repository not found: {}", error_text),
+                413 => format!("File too large: {}", error_text),
+                500 => format!("Registry server error: {}", error_text),
+                502 | 503 => format!("Registry unavailable: {}", error_text),
+                507 => format!("Registry out of storage: {}", error_text),
+                _ => format!("Upload failed (status {}): {}", status, error_text)
+            };
+            
+            self.output.error(&error_msg);
+            Err(PusherError::Upload(error_msg))
+        }
     }
 }

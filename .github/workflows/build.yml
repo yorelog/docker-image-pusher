@@ -94,88 +94,41 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: artifacts
-        
-    - name: Prepare release binaries
-      run: |
-        cd artifacts
-        # Make binaries executable
-        chmod +x docker-image-pusher-x86_64-unknown-linux-gnu/docker-image-pusher
-        chmod +x docker-image-pusher-x86_64-apple-darwin/docker-image-pusher
-        chmod +x docker-image-pusher-aarch64-apple-darwin/docker-image-pusher
-        
-        # Rename binaries for clarity
-        mv docker-image-pusher-x86_64-unknown-linux-gnu/docker-image-pusher docker-image-pusher-linux-x64
-        mv docker-image-pusher-x86_64-pc-windows-msvc/docker-image-pusher.exe docker-image-pusher-windows-x64.exe
-        mv docker-image-pusher-x86_64-apple-darwin/docker-image-pusher docker-image-pusher-macos-intel
-        mv docker-image-pusher-aarch64-apple-darwin/docker-image-pusher docker-image-pusher-macos-arm64
-        
-    - name: Generate checksums
-      run: |
-        cd artifacts
-        sha256sum docker-image-pusher-linux-x64 > ../checksums.txt
-        sha256sum docker-image-pusher-windows-x64.exe >> ../checksums.txt
-        sha256sum docker-image-pusher-macos-intel >> ../checksums.txt
-        sha256sum docker-image-pusher-macos-arm64 >> ../checksums.txt
-        echo "Generated checksums:"
-        cat ../checksums.txt
       
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          artifacts/docker-image-pusher-linux-x64
-          artifacts/docker-image-pusher-windows-x64.exe
-          artifacts/docker-image-pusher-macos-intel
-          artifacts/docker-image-pusher-macos-arm64
-          checksums.txt
+          artifacts/docker-image-pusher-x86_64-unknown-linux-gnu/docker-image-pusher
+          artifacts/docker-image-pusher-x86_64-pc-windows-msvc/docker-image-pusher.exe
+          artifacts/docker-image-pusher-x86_64-apple-darwin/docker-image-pusher
+          artifacts/docker-image-pusher-aarch64-apple-darwin/docker-image-pusher
         body: |
           ## Docker Image Pusher ${{ github.ref_name }}
           
-          This release includes pre-built binaries for multiple platforms with enhanced features and documentation.
+          This release includes pre-built binaries for multiple platforms.
           
-          ### 🚀 New Features in v0.1.2
-          - **Enhanced CLI Options**: `--skip-existing`, `--force-upload`, `--quiet`, `--dry-run`
-          - **Resume Functionality**: Automatically resume interrupted uploads
-          - **Performance Optimizations**: Improved upload strategies and parallel processing
-          - **Better Error Handling**: Enhanced error messages and recovery mechanisms
-          - **Comprehensive Documentation**: Updated README with enterprise scenarios and troubleshooting
-          
-          ### ✨ Core Features
+          ### Features
           - Push Docker image tar packages directly to registries
           - Chunked uploads for large images (>10GB support)
           - Authentication support with Docker registries
-          - Real-time progress tracking with detailed statistics
+          - Real-time progress tracking
           - Cross-platform compatibility
-          - Configurable timeouts and retry mechanisms
           
-          ### 📖 Usage
+          ### Usage
           ```bash
           ./docker-image-pusher \
             --address http://your-registry:5000 \
             --username your-username \
             --password your-password \
-            --file /path/to/image.tar \
-            --skip-existing \
-            --quiet
+            --file /path/to/image.tar
           ```
           
-          ### 📥 Download Instructions
-          Choose the appropriate binary for your platform:
-          
-          | Platform | Architecture | Binary |
-          |----------|-------------|---------|
-          | **Linux** | x86_64 | `docker-image-pusher-linux-x64` |
-          | **Windows** | x86_64 | `docker-image-pusher-windows-x64.exe` |
-          | **macOS** | Intel | `docker-image-pusher-macos-intel` |
-          | **macOS** | Apple Silicon | `docker-image-pusher-macos-arm64` |
-          
-          ### 🔒 Security
-          - Verify downloads using the provided `checksums.txt`
-          - All binaries are built from source using GitHub Actions
-          
-          ### 📚 Documentation
-          - [English README](https://github.com/yorelog/docker-image-pusher/blob/main/README.md)
-          - [中文文档](https://github.com/yorelog/docker-image-pusher/blob/main/README_zh.md)
+          ### Download Instructions
+          - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-gnu)
+          - **Windows x64**: `docker-image-pusher.exe` (x86_64-pc-windows-msvc)
+          - **macOS Intel**: `docker-image-pusher` (x86_64-apple-darwin)
+          - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)
         draft: false
         prerelease: false
       env:

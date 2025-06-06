@@ -107,7 +107,7 @@ docker-image-pusher \
 | Short | Long | Description | Default | Example |
 |-------|------|-------------|---------|---------|
 | `-t` | `--timeout` | Network timeout (seconds) | `7200` | `3600` |
-|  | `--large-layer-threshold` | Large layer threshold (bytes) | `1GB` | `2147483648` |
+|  | `--large-layer-threshold` | Large layer threshold (bytes) | `1073741824` | `2147483648` |
 |  | `--max-concurrent` | Maximum concurrent uploads | `1` | `4` |
 |  | `--retry-attempts` | Number of retry attempts | `3` | `5` |
 
@@ -119,6 +119,8 @@ docker-image-pusher \
 | `--verbose` | Enable detailed output | Debugging and monitoring |
 | `--quiet` | Suppress all output except errors | Automated scripts |
 | `--dry-run` | Validate without uploading | Configuration testing |
+| `--skip-existing` | Skip uploading layers that already exist | Resume interrupted uploads |
+| `--force-upload` | Force upload even if layers exist | Overwrite existing layers |
 
 ### Advanced Examples
 
@@ -147,6 +149,32 @@ docker-image-pusher \
   -p $HARBOR_PASSWORD \
   --skip-tls \               # For self-signed certificates
   --max-concurrent 2 \       # Conservative for production
+  --skip-existing \          # Skip layers that already exist
+  --verbose
+```
+
+#### Resume Interrupted Upload
+```bash
+# Resume upload that was previously interrupted
+docker-image-pusher \
+  -r https://registry.company.com/big-app:latest \
+  -f big-app.tar \
+  -u deploy-user \
+  -p $DEPLOY_PASSWORD \
+  --skip-existing \          # Skip already uploaded layers
+  --retry-attempts 5 \       # Higher retry count
+  --verbose
+```
+
+#### Force Complete Re-upload
+```bash
+# Force complete re-upload of all layers
+docker-image-pusher \
+  -r https://registry.company.com/app:latest \
+  -f app.tar \
+  -u admin \
+  -p $ADMIN_PASSWORD \
+  --force-upload \           # Force upload even if layers exist
   --verbose
 ```
 

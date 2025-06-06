@@ -1,7 +1,9 @@
 //! Optimized upload implementation for large files
 
 use crate::error::{Result, PusherError};
+use crate::error::handlers::NetworkErrorHandler;
 use crate::output::OutputManager;
+use crate::digest::DigestUtils;
 use reqwest::{Client, header::CONTENT_TYPE};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -36,39 +38,51 @@ impl ChunkedUploader {
         }
     }
 
+    /// Upload a blob using direct upload (recommended for Docker registries)
     pub async fn upload_large_blob(
         &self,
         upload_url: &str,
         data: &[u8],
-        digest: &str,
+        expected_digest: &str,
         token: &Option<String>,
     ) -> Result<()> {
-        let data_size = data.len() as u64;
+        self.output.detail(&format!("Starting upload for {} bytes", data.len()));
         
-        self.output.step(&format!("Starting chunked upload for {} ({})", 
-            &digest[..16], self.output.format_size(data_size)));
+        // Use direct upload - most reliable method for Docker registries
+        self.upload_direct(upload_url, data, expected_digest, token).await
+    }
+
+    async fn upload_direct(
+        &self,
+        upload_url: &str,
+        data: &[u8],
+        expected_digest: &str,
+        token: &Option<String>,
+    ) -> Result<()> {
+        self.output.detail(&format!("Using direct upload for {} bytes", data.len()));
         
         for attempt in 1..=self.max_retries {
-            self.output.detail(&format!("Chunked upload attempt {} of {}", attempt, self.max_retries));
-            
-            match self.try_upload(upload_url, data, digest, token).await {
-                Ok(_) => {
-                    self.output.success(&format!("Chunked upload completed successfully on attempt {}", attempt));
-                    return Ok(());
-                }
-                Err(e) if attempt < self.max_retries => {
-                    self.output.warning(&format!("Chunked attempt {} failed: {}", attempt, e));
-                    self.output.info(&format!("Waiting {}s before retry...", self.retry_delay.as_secs()));
-                    sleep(self.retry_delay).await;
-                }
+            match self.try_upload(upload_url, data, expected_digest, token).await {
+                Ok(()) => return Ok(()),
                 Err(e) => {
-                    self.output.error(&format!("All {} chunked attempts failed. Last error: {}", self.max_retries, e));
-                    return Err(e);
+                    if attempt < self.max_retries {
+                        self.output.warning(&format!(
+                            "Upload attempt {}/{} failed: {}. Retrying in {}s...",
+                            attempt,
+                            self.max_retries,
+                            e,
+                            self.retry_delay.as_secs()
+                        ));
+                        sleep(self.retry_delay).await;
+                    } else {
+                        self.output.error(&format!("All {} upload attempts failed", self.max_retries));
+                        return Err(e);
+                    }
                 }
             }
         }
         
-        Err(PusherError::Upload("All chunked upload attempts failed".to_string()))
+        unreachable!()
     }
 
     async fn try_upload(
@@ -80,13 +94,30 @@ impl ChunkedUploader {
     ) -> Result<()> {
         let data_size = data.len() as u64;
         
-        let url = format!("{}digest={}", 
-            if upload_url.contains('?') { format!("{}&", upload_url) } else { format!("{}?", upload_url) },
-            digest
-        );
+        // Normalize and validate digest using DigestUtils
+        let normalized_digest = DigestUtils::normalize_digest(digest)?;
         
-        self.output.detail(&format!("Upload URL: {}", url));
+        // Fix URL construction - ensure proper format for Harbor registry
+        let url = if upload_url.contains('?') {
+            format!("{}&digest={}", upload_url, normalized_digest)
+        } else {
+            format!("{}?digest={}", upload_url, normalized_digest)
+        };
+        
+        // Show more of the URL for debugging
+        let display_url = if url.len() > 100 {
+            format!("{}...{}", &url[..50], &url[url.len()-30..])
+        } else {
+            url.clone()
+        };
+        
+        self.output.detail(&format!("Upload URL: {}", display_url));
         self.output.detail(&format!("Upload size: {}", self.output.format_size(data_size)));
+        self.output.detail(&format!("Expected digest: {}", normalized_digest));
+        
+        // Verify data integrity before upload using DigestUtils
+        DigestUtils::verify_data_integrity(data, &normalized_digest)?;
+        self.output.detail(&format!("✅ Data integrity verified: SHA256 digest matches"));
         
         let mut request = self.client
             .put(&url)
@@ -107,19 +138,8 @@ impl ChunkedUploader {
         
         let response = request.send().await
             .map_err(|e| {
-                self.output.error(&format!("Network error during chunked upload: {}", e));
-                
-                if e.is_timeout() {
-                    PusherError::Upload(format!("Chunked upload timeout after {}s", self.timeout.as_secs()))
-                } else if e.is_connect() {
-                    PusherError::Network(e.to_string())
-                } else if e.to_string().contains("dns") {
-                    PusherError::Network(e.to_string())
-                } else if e.to_string().contains("certificate") {
-                    PusherError::Network(e.to_string())
-                } else {
-                    PusherError::Network(e.to_string())
-                }
+                self.output.error(&format!("Network error during upload: {}", e));
+                NetworkErrorHandler::handle_network_error(&e, "upload")
             })?;
         
         let elapsed = start_time.elapsed();
@@ -131,9 +151,10 @@ impl ChunkedUploader {
         
         self.output.progress_done();
         self.output.info(&format!("Upload completed in {} (avg speed: {})", 
-                 self.output.format_duration(elapsed), self.output.format_size(speed)));
+                 self.output.format_duration(elapsed), self.output.format_speed(speed)));
         
-        if response.status().is_success() {
+        if response.status().is_success() || response.status().as_u16() == 201 {
+            self.output.success("Upload successful");
             Ok(())
         } else {
             let status = response.status();
@@ -141,11 +162,21 @@ impl ChunkedUploader {
                 .unwrap_or_else(|_| "Failed to read error response".to_string());
             
             let error_msg = match status.as_u16() {
-                400 => format!("Bad request: {}", error_text),
+                400 => {
+                    if error_text.contains("exist blob require digest") {
+                        format!("Digest validation failed - Registry reports blob exists but digest mismatch: {}", error_text)
+                    } else if error_text.contains("BAD_REQUEST") {
+                        format!("Bad request - Check digest format and data integrity: {}", error_text)
+                    } else {
+                        format!("Bad request: {}", error_text)
+                    }
+                },
                 401 => format!("Authentication failed: {}", error_text),
                 403 => format!("Permission denied: {}", error_text),
-                404 => format!("Repository not found: {}", error_text),
+                404 => format!("Repository not found or upload session expired: {}", error_text),
+                409 => format!("Conflict - Blob already exists with different digest: {}", error_text),
                 413 => format!("File too large: {}", error_text),
+                422 => format!("Invalid digest or data: {}", error_text),
                 500 => format!("Registry server error: {}", error_text),
                 502 | 503 => format!("Registry unavailable: {}", error_text),
                 507 => format!("Registry out of storage: {}", error_text),
@@ -156,4 +187,5 @@ impl ChunkedUploader {
             Err(PusherError::Upload(error_msg))
         }
     }
+
 }

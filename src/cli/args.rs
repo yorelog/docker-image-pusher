@@ -1,13 +1,13 @@
 //! Command line argument parsing and validation
 
 use crate::error::{Result, PusherError};
+use crate::error::handlers::ValidationErrorHandler;
 use clap::Parser;
-use std::path::Path;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "docker-image-pusher",
-    version = "0.1.1",
+    version = "0.1.2",
     about = "Push Docker images to registries with optimized large layer handling",
     long_about = None
 )]
@@ -59,6 +59,14 @@ pub struct Args {
     /// Number of retry attempts for failed uploads (default: 3)
     #[arg(long, default_value = "3")]
     pub retry_attempts: usize,
+
+    /// Skip uploading layers that already exist in the registry
+    #[arg(long)]
+    pub skip_existing: bool,
+
+    /// Force upload even if layers already exist
+    #[arg(long)]
+    pub force_upload: bool,
 }
 
 impl Args {
@@ -73,63 +81,18 @@ impl Args {
     pub fn try_parse() -> Result<Self> {
         <Self as Parser>::try_parse()
             .map_err(|e| PusherError::Validation(format!("Failed to parse arguments: {}", e)))
-    }
+    }    pub fn validate(&self) -> Result<()> {
+        // Use standardized file validation
+        ValidationErrorHandler::validate_file_path(&self.file)?;
 
-    pub fn validate(&self) -> Result<()> {
-        // Validate file path
-        let file_path = Path::new(&self.file);
-        if !file_path.exists() {
-            return Err(PusherError::Validation(format!(
-                "Input file does not exist: {}", 
-                self.file
-            )));
-        }
+        // Use standardized URL validation
+        ValidationErrorHandler::validate_repository_url(&self.repository_url)?;
 
-        if !file_path.is_file() {
-            return Err(PusherError::Validation(format!(
-                "Input path is not a file: {}", 
-                self.file
-            )));
-        }
+        // Use standardized timeout validation
+        ValidationErrorHandler::validate_timeout(self.timeout)?;
 
-        // Check file extension
-        let extension = file_path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("");
-        
-        if !matches!(extension.to_lowercase().as_str(), "tar" | "tar.gz" | "tgz") {
-            return Err(PusherError::Validation(format!(
-                "Input file must be a tar archive (.tar, .tar.gz, or .tgz): {}", 
-                self.file
-            )));
-        }
-
-        // Validate repository URL
-        if self.repository_url.is_empty() {
-            return Err(PusherError::Validation(
-                "Repository URL cannot be empty".to_string()
-            ));
-        }
-
-        // Basic URL format validation
-        if !self.repository_url.contains("://") {
-            return Err(PusherError::Validation(
-                "Repository URL must include protocol (http:// or https://)".to_string()
-            ));
-        }
-
-        // Validate timeout
-        if self.timeout == 0 {
-            return Err(PusherError::Validation(
-                "Timeout must be greater than 0".to_string()
-            ));
-        }
-
-        if self.timeout > 86400 { // 24 hours
-            return Err(PusherError::Validation(
-                "Timeout cannot exceed 24 hours (86400 seconds)".to_string()
-            ));
-        }
+        // Use standardized credential validation
+        ValidationErrorHandler::validate_credentials(&self.username, &self.password)?;
 
         // Validate large layer threshold
         if self.large_layer_threshold == 0 {
@@ -180,6 +143,12 @@ impl Args {
             ));
         }
 
+        if self.skip_existing && self.force_upload {
+            return Err(PusherError::Validation(
+                "Cannot specify both --skip-existing and --force-upload flags".to_string()
+            ));
+        }
+
         Ok(())
     }
 
@@ -220,6 +189,8 @@ mod tests {
             large_layer_threshold: 1073741824,
             max_concurrent: 1,
             retry_attempts: 3,
+            skip_existing: false,
+            force_upload: false,
         };
 
         assert!(args.validate().is_err());
@@ -240,6 +211,8 @@ mod tests {
             large_layer_threshold: 1073741824,
             max_concurrent: 1,
             retry_attempts: 3,
+            skip_existing: false,
+            force_upload: false,
         };
 
         assert!(args.validate().is_err());
@@ -260,6 +233,8 @@ mod tests {
             large_layer_threshold: 1073741824,
             max_concurrent: 1,
             retry_attempts: 3,
+            skip_existing: false,
+            force_upload: false,
         };
 
         assert!(args.validate().is_err());

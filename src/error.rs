@@ -1,4 +1,7 @@
 //! Error handling for the docker image pusher
+//! Includes standardized error handlers to eliminate duplication
+
+pub mod handlers;
 
 use std::fmt;
 

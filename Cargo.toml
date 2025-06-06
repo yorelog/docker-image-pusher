@@ -1,7 +1,7 @@
 [package]
 name = "docker-image-pusher"
-version = "0.1.1"
-edition = "2021"
+version = "0.1.2"
+edition = "2024"
 description = "A command-line tool for pushing Docker image tar packages directly to Docker registries with chunked upload support"
 license = "MIT"
 authors = ["yorelog <yorelog@gmail.com>"]
@@ -24,3 +24,6 @@ clap = { version = "4.4", features = ["derive"] }
 url = "2.4"
 anyhow = "1.0.98"
 base64 = "0.22.1"
+futures = "0.3.31"
+async-trait = "0.1.88"
+

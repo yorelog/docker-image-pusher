@@ -1,6 +1,7 @@
 //! Streaming upload implementation for very large files
 
 use crate::error::{Result, PusherError};
+use crate::error::handlers::NetworkErrorHandler;
 use crate::output::OutputManager;
 use reqwest::{Client, header::CONTENT_TYPE, Body};
 use std::path::Path;
@@ -96,10 +97,12 @@ impl StreamingUploader {
     where
         P: Fn(u64, u64) + Send + Sync + 'static,
     {
-        let url = format!("{}digest={}", 
-            if upload_url.contains('?') { format!("{}&", upload_url) } else { format!("{}?", upload_url) },
-            digest
-        );
+        // Fix URL construction to match the chunked uploader
+        let url = if upload_url.contains('?') {
+            format!("{}&digest={}", upload_url, digest)
+        } else {
+            format!("{}?digest={}", upload_url, digest)
+        };
 
         // Open async file and seek to the correct position
         let mut async_file = tokio::fs::File::open(tar_path).await
@@ -129,14 +132,9 @@ impl StreamingUploader {
         self.output.progress(&format!("Streaming {}", self.output.format_size(entry_size)));
         let start_time = std::time::Instant::now();
 
-        let response = request.send().await
-            .map_err(|e| {
+        let response = request.send().await            .map_err(|e| {
                 self.output.error(&format!("Network error during streaming upload: {}", e));
-                if e.is_timeout() {
-                    PusherError::Upload(format!("Streaming upload timeout after {}s", self.timeout.as_secs()))
-                } else {
-                    PusherError::Network(e.to_string())
-                }
+                NetworkErrorHandler::handle_network_error(&e, "streaming upload")
             })?;
 
         let elapsed = start_time.elapsed();

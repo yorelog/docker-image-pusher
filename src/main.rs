@@ -14,6 +14,14 @@ async fn main() {
     // Validate arguments
     if let Err(e) = args.validate() {
         eprintln!("❌ Validation error: {}", e);
+        
+        // Add helpful hints for new flags
+        if e.to_string().contains("skip-existing") || e.to_string().contains("force-upload") {
+            eprintln!("💡 Use --skip-existing to avoid uploading layers that already exist");
+            eprintln!("   Use --force-upload to upload all layers regardless of existence");
+            eprintln!("   These flags are mutually exclusive");
+        }
+        
         std::process::exit(1);
     }
 

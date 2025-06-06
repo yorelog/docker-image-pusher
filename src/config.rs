@@ -1,7 +1,11 @@
 //! Configuration structures and utilities
+//!
+//! This module defines configuration types for authentication and registry settings, including
+//! [`AuthConfig`] for credentials and [`RegistryConfig`] for registry connection details.
+//! It provides helpers for constructing and validating configuration from CLI or environment.
 
+use crate::error::{PusherError, Result};
 use serde::{Deserialize, Serialize};
-use crate::error::{Result, PusherError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -17,8 +21,12 @@ impl AuthConfig {
     pub fn from_optional(username: Option<String>, password: Option<String>) -> Result<Self> {
         match (username, password) {
             (Some(u), Some(p)) => Ok(Self::new(u, p)),
-            (None, _) => Err(PusherError::Config("Username is required for authentication".to_string())),
-            (_, None) => Err(PusherError::Config("Password is required for authentication".to_string())),
+            (None, _) => Err(PusherError::Config(
+                "Username is required for authentication".to_string(),
+            )),
+            (_, None) => Err(PusherError::Config(
+                "Password is required for authentication".to_string(),
+            )),
         }
     }
 }
@@ -73,12 +81,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn new(
-        registry_url: &str,
-        repository: &str,
-        tag: &str,
-        file_path: String,
-    ) -> Result<Self> {
+    pub fn new(registry_url: &str, repository: &str, tag: &str, file_path: String) -> Result<Self> {
         let registry_config = RegistryConfig::new(
             registry_url.to_string(),
             repository.to_string(),
@@ -102,7 +105,11 @@ impl AppConfig {
         self
     }
 
-    pub fn with_optional_auth(mut self, username: Option<String>, password: Option<String>) -> Result<Self> {
+    pub fn with_optional_auth(
+        mut self,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<Self> {
         if let (Some(u), Some(p)) = (username, password) {
             self = self.with_auth(u, p);
         }
@@ -152,9 +159,11 @@ impl AppConfig {
         let parsed_url = url::Url::parse(url)
             .map_err(|e| PusherError::Config(format!("Invalid repository URL: {}", e)))?;
 
-        let registry_address = format!("{}://{}", 
-            parsed_url.scheme(), 
-            parsed_url.host_str().unwrap_or("localhost"));
+        let registry_address = format!(
+            "{}://{}",
+            parsed_url.scheme(),
+            parsed_url.host_str().unwrap_or("localhost")
+        );
 
         let path = parsed_url.path().trim_start_matches('/');
         let (repository, tag) = if let Some(colon_pos) = path.rfind(':') {

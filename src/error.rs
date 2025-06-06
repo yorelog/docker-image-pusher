@@ -1,5 +1,7 @@
 //! Error handling for the docker image pusher
-//! Includes standardized error handlers to eliminate duplication
+//!
+//! This module defines the [`PusherError`] enum for all major error types encountered in the application,
+//! and provides standardized error handlers to eliminate duplication and improve reporting.
 
 pub mod handlers;
 
@@ -60,8 +62,12 @@ impl From<std::io::Error> for PusherError {
     fn from(err: std::io::Error) -> Self {
         match err.kind() {
             std::io::ErrorKind::NotFound => PusherError::Io(format!("File not found: {}", err)),
-            std::io::ErrorKind::PermissionDenied => PusherError::Io(format!("Permission denied: {}", err)),
-            std::io::ErrorKind::TimedOut => PusherError::Timeout(format!("I/O operation timed out: {}", err)),
+            std::io::ErrorKind::PermissionDenied => {
+                PusherError::Io(format!("Permission denied: {}", err))
+            }
+            std::io::ErrorKind::TimedOut => {
+                PusherError::Timeout(format!("I/O operation timed out: {}", err))
+            }
             _ => PusherError::Io(err.to_string()),
         }
     }
@@ -99,13 +105,17 @@ pub type Result<T> = std::result::Result<T, PusherError>;
 pub fn context_error<T>(result: std::result::Result<T, PusherError>, context: &str) -> Result<T> {
     result.map_err(|e| match e {
         PusherError::Config(msg) => PusherError::Config(format!("{}: {}", context, msg)),
-        PusherError::Authentication(msg) => PusherError::Authentication(format!("{}: {}", context, msg)),
+        PusherError::Authentication(msg) => {
+            PusherError::Authentication(format!("{}: {}", context, msg))
+        }
         PusherError::Network(msg) => PusherError::Network(format!("{}: {}", context, msg)),
         PusherError::Upload(msg) => PusherError::Upload(format!("{}: {}", context, msg)),
         PusherError::Io(msg) => PusherError::Io(format!("{}: {}", context, msg)),
         PusherError::Parse(msg) => PusherError::Parse(format!("{}: {}", context, msg)),
         PusherError::Registry(msg) => PusherError::Registry(format!("{}: {}", context, msg)),
-        PusherError::ImageParsing(msg) => PusherError::ImageParsing(format!("{}: {}", context, msg)),
+        PusherError::ImageParsing(msg) => {
+            PusherError::ImageParsing(format!("{}: {}", context, msg))
+        }
         PusherError::Validation(msg) => PusherError::Validation(format!("{}: {}", context, msg)),
         PusherError::Timeout(msg) => PusherError::Timeout(format!("{}: {}", context, msg)),
     })

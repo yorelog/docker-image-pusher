@@ -1,13 +1,16 @@
 //! Command line argument parsing and validation
+//!
+//! This module defines the [`Args`] struct for parsing CLI arguments using `clap`,
+//! and provides validation logic for user input.
 
-use crate::error::{Result, PusherError};
 use crate::error::handlers::ValidationErrorHandler;
+use crate::error::{PusherError, Result};
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "docker-image-pusher",
-    version = "0.1.2",
+    version = "0.1.3",
     about = "Push Docker images to registries with optimized large layer handling",
     long_about = None
 )]
@@ -60,6 +63,10 @@ pub struct Args {
     #[arg(long, default_value = "3")]
     pub retry_attempts: usize,
 
+    /// Enable exponential backoff for storage backend errors (default: true)
+    #[arg(long, default_value = "true")]
+    pub storage_error_backoff: bool,
+
     /// Skip uploading layers that already exist in the registry
     #[arg(long)]
     pub skip_existing: bool,
@@ -81,7 +88,8 @@ impl Args {
     pub fn try_parse() -> Result<Self> {
         <Self as Parser>::try_parse()
             .map_err(|e| PusherError::Validation(format!("Failed to parse arguments: {}", e)))
-    }    pub fn validate(&self) -> Result<()> {
+    }
+    pub fn validate(&self) -> Result<()> {
         // Use standardized file validation
         ValidationErrorHandler::validate_file_path(&self.file)?;
 
@@ -97,27 +105,27 @@ impl Args {
         // Validate large layer threshold
         if self.large_layer_threshold == 0 {
             return Err(PusherError::Validation(
-                "Large layer threshold must be greater than 0".to_string()
+                "Large layer threshold must be greater than 0".to_string(),
             ));
         }
 
         // Validate max concurrent
         if self.max_concurrent == 0 {
             return Err(PusherError::Validation(
-                "Max concurrent uploads must be at least 1".to_string()
+                "Max concurrent uploads must be at least 1".to_string(),
             ));
         }
 
         if self.max_concurrent > 10 {
             return Err(PusherError::Validation(
-                "Max concurrent uploads cannot exceed 10".to_string()
+                "Max concurrent uploads cannot exceed 10".to_string(),
             ));
         }
 
         // Validate retry attempts
         if self.retry_attempts > 10 {
             return Err(PusherError::Validation(
-                "Retry attempts cannot exceed 10".to_string()
+                "Retry attempts cannot exceed 10".to_string(),
             ));
         }
 
@@ -125,27 +133,27 @@ impl Args {
         match (&self.username, &self.password) {
             (Some(_), None) => {
                 return Err(PusherError::Validation(
-                    "Password is required when username is provided".to_string()
+                    "Password is required when username is provided".to_string(),
                 ));
-            },
+            }
             (None, Some(_)) => {
                 return Err(PusherError::Validation(
-                    "Username is required when password is provided".to_string()
+                    "Username is required when password is provided".to_string(),
                 ));
-            },
+            }
             _ => {} // Both provided or both None is fine
         }
 
         // Validate mutually exclusive flags
         if self.verbose && self.quiet {
             return Err(PusherError::Validation(
-                "Cannot specify both --verbose and --quiet flags".to_string()
+                "Cannot specify both --verbose and --quiet flags".to_string(),
             ));
         }
 
         if self.skip_existing && self.force_upload {
             return Err(PusherError::Validation(
-                "Cannot specify both --skip-existing and --force-upload flags".to_string()
+                "Cannot specify both --skip-existing and --force-upload flags".to_string(),
             ));
         }
 
@@ -191,6 +199,7 @@ mod tests {
             retry_attempts: 3,
             skip_existing: false,
             force_upload: false,
+            storage_error_backoff: true,
         };
 
         assert!(args.validate().is_err());
@@ -213,6 +222,7 @@ mod tests {
             retry_attempts: 3,
             skip_existing: false,
             force_upload: false,
+            storage_error_backoff: true,
         };
 
         assert!(args.validate().is_err());
@@ -235,6 +245,7 @@ mod tests {
             retry_attempts: 3,
             skip_existing: false,
             force_upload: false,
+            storage_error_backoff: true,
         };
 
         assert!(args.validate().is_err());

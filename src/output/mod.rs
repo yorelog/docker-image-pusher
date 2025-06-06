@@ -1,7 +1,10 @@
 //! Enhanced output control module with structured logging
+//!
+//! This module provides the [`OutputManager`] for controlling output verbosity, formatting logs,
+//! and tracking operation timing. It supports quiet, verbose, and structured output for CI and debugging.
 
 use std::io::{self, Write};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct OutputManager {
@@ -114,11 +117,11 @@ impl OutputManager {
         if !self.quiet {
             println!("\n📋 {}", title);
             println!("{}", "─".repeat(title.len() + 3));
-            
+
             for item in items {
                 println!("  • {}", item);
             }
-            
+
             if items.is_empty() {
                 println!("  (No items to display)");
             }
@@ -130,17 +133,14 @@ impl OutputManager {
         if !self.quiet {
             println!("\n📋 {}", title);
             println!("{}", "─".repeat(title.len() + 3));
-            
+
             // Find the maximum key length for alignment
-            let max_key_len = items.iter()
-                .map(|(key, _)| key.len())
-                .max()
-                .unwrap_or(0);
-            
+            let max_key_len = items.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+
             for (key, value) in items {
                 println!("  {:width$}: {}", key, value, width = max_key_len);
             }
-            
+
             if items.is_empty() {
                 println!("  (No items to display)");
             }
@@ -153,11 +153,11 @@ impl OutputManager {
             if !title.is_empty() {
                 println!("\n📝 {}", title);
             }
-            
+
             for (index, item) in items.iter().enumerate() {
                 println!("  {}. {}", index + 1, item);
             }
-            
+
             if items.is_empty() && !title.is_empty() {
                 println!("  (No items in list)");
             }
@@ -169,7 +169,7 @@ impl OutputManager {
         if !self.quiet && !headers.is_empty() {
             // Calculate column widths
             let mut col_widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-            
+
             for row in rows {
                 for (i, cell) in row.iter().enumerate() {
                     if i < col_widths.len() {
@@ -177,7 +177,7 @@ impl OutputManager {
                     }
                 }
             }
-            
+
             // Print header
             print!("  ");
             for (i, header) in headers.iter().enumerate() {
@@ -187,7 +187,7 @@ impl OutputManager {
                 }
             }
             println!();
-            
+
             // Print separator
             print!("  ");
             for (i, &width) in col_widths.iter().enumerate() {
@@ -197,7 +197,7 @@ impl OutputManager {
                 }
             }
             println!();
-            
+
             // Print rows
             for row in rows {
                 print!("  ");
@@ -222,8 +222,9 @@ impl OutputManager {
             } else {
                 100.0
             };
-            
-            println!("📊 {}: {}/{} ({:.1}%)", 
+
+            println!(
+                "📊 {}: {}/{} ({:.1}%)",
                 operation,
                 self.format_size(current),
                 self.format_size(total),
@@ -240,25 +241,23 @@ impl OutputManager {
             } else {
                 100.0
             };
-            
+
             let filled = (width as f64 * (percentage / 100.0)) as usize;
             let empty = width - filled;
-            
-            let bar = format!("{}{}",
-                "█".repeat(filled),
-                "░".repeat(empty)
-            );
-            
-            print!("\r📊 {}: [{}] {:.1}% ({}/{})",
+
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+
+            print!(
+                "\r📊 {}: [{}] {:.1}% ({}/{})",
                 operation,
                 bar,
                 percentage,
                 self.format_size(current),
                 self.format_size(total)
             );
-            
+
             let _ = io::stdout().flush();
-            
+
             if current >= total {
                 println!(); // New line when complete
             }
@@ -270,12 +269,12 @@ impl OutputManager {
         const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
         let mut size = bytes as f64;
         let mut unit_index = 0;
-        
+
         while size >= 1024.0 && unit_index < UNITS.len() - 1 {
             size /= 1024.0;
             unit_index += 1;
         }
-        
+
         if unit_index == 0 {
             format!("{} {}", bytes, UNITS[unit_index])
         } else {
@@ -288,7 +287,7 @@ impl OutputManager {
         let hours = total_seconds / 3600;
         let minutes = (total_seconds % 3600) / 60;
         let seconds = total_seconds % 60;
-        
+
         if hours > 0 {
             format!("{}h {}m {}s", hours, minutes, seconds)
         } else if minutes > 0 {

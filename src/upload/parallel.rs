@@ -1,14 +1,14 @@
 //! Parallel upload implementation with concurrency control
 
-use crate::error::{Result, PusherError};
-use crate::output::OutputManager;
-use crate::upload::{ProgressTracker, UploadStrategyFactory};
+use crate::error::{PusherError, Result};
 use crate::image::parser::LayerInfo;
+use crate::output::OutputManager;
 use crate::registry::RegistryClient;
+use crate::upload::{ProgressTracker, UploadStrategyFactory};
+use futures::future::try_join_all;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
-use futures::future::try_join_all;
 
 pub struct ParallelUploader {
     client: Arc<RegistryClient>,
@@ -52,7 +52,7 @@ impl ParallelUploader {
     ) -> Result<()> {
         let start_time = Instant::now();
         let total_size: u64 = layers.iter().map(|l| l.size).sum();
-        
+
         self.output.section("Parallel Layer Upload");
         self.output.info(&format!(
             "Uploading {} layers ({}) with {} concurrent connections",
@@ -63,18 +63,20 @@ impl ParallelUploader {
 
         // Create semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
-        
+
         // Create progress tracker
-        let progress_tracker = Arc::new(tokio::sync::Mutex::new(
-            ProgressTracker::new(total_size, self.output.clone(), "Parallel Upload".to_string())
-        ));
-        
+        let progress_tracker = Arc::new(tokio::sync::Mutex::new(ProgressTracker::new(
+            total_size,
+            self.output.clone(),
+            "Parallel Upload".to_string(),
+        )));
+
         // Prepare upload tasks
         let mut upload_tasks = Vec::new();
         for (index, layer) in layers.into_iter().enumerate() {
             // Start upload session for each layer
             let upload_url = self.client.start_upload_session(repository).await?;
-            
+
             upload_tasks.push(UploadTask {
                 layer,
                 index,
@@ -83,7 +85,8 @@ impl ParallelUploader {
             });
         }
 
-        self.output.info(&format!("Created {} upload sessions", upload_tasks.len()));
+        self.output
+            .info(&format!("Created {} upload sessions", upload_tasks.len()));
 
         // Execute uploads in parallel
         let upload_futures = upload_tasks.into_iter().map(|task| {
@@ -98,7 +101,7 @@ impl ParallelUploader {
 
         // Wait for all uploads to complete
         let results = try_join_all(upload_futures).await?;
-        
+
         let elapsed = start_time.elapsed();
         let avg_speed = if elapsed.as_secs() > 0 {
             total_size / elapsed.as_secs()
@@ -131,39 +134,45 @@ impl ParallelUploader {
         progress_tracker: Arc<tokio::sync::Mutex<ProgressTracker>>,
     ) -> Result<()> {
         // Acquire semaphore permit
-        let _permit = semaphore.acquire().await
+        let _permit = semaphore
+            .acquire()
+            .await
             .map_err(|e| PusherError::Upload(format!("Failed to acquire upload permit: {}", e)))?;
 
         let layer_start = Instant::now();
-        
+
         // Replace unstable thread_id with a stable alternative
         let thread_info = format!("task-{}", task.index);
-        
+
         self.output.detail(&format!(
             "Starting upload for layer {} ({}) - {}",
             task.index + 1,
             self.output.format_size(task.layer.size),
             thread_info
-        ));        let result = {
+        ));
+        let result = {
             // Create strategy factory
             let factory = UploadStrategyFactory::new(
                 self.large_layer_threshold,
                 self.timeout,
-                self.output.clone()
+                self.output.clone(),
             );
-            
+
             // Get appropriate strategy for this layer
             let strategy = factory.get_strategy(&task.layer);
-            
+
             // Use the strategy to upload the layer
-            strategy.upload_layer(
-                &task.layer,
-                &task.repository,
-                tar_path,
-                token,
-                &task.upload_url,
-            ).await
-        };match result {
+            strategy
+                .upload_layer(
+                    &task.layer,
+                    &task.repository,
+                    tar_path,
+                    token,
+                    &task.upload_url,
+                )
+                .await
+        };
+        match result {
             Ok(_) => {
                 let elapsed = layer_start.elapsed();
                 let speed = if elapsed.as_secs() > 0 {

@@ -1,11 +1,11 @@
 //! Unified upload strategy interface to eliminate duplication
 
 use crate::error::Result;
-use crate::output::OutputManager;
 use crate::image::parser::LayerInfo;
+use crate::output::OutputManager;
 use crate::tar_utils::TarUtils;
-use std::path::Path;
 use async_trait::async_trait;
+use std::path::Path;
 
 /// Common upload strategy trait
 #[async_trait]
@@ -47,7 +47,8 @@ pub struct StreamingLayerStrategy {
 }
 
 #[async_trait]
-impl UploadStrategy for EmptyLayerStrategy {    async fn upload_layer(
+impl UploadStrategy for EmptyLayerStrategy {
+    async fn upload_layer(
         &self,
         layer: &LayerInfo,
         _repository: &str,
@@ -55,18 +56,16 @@ impl UploadStrategy for EmptyLayerStrategy {    async fn upload_layer(
         token: &Option<String>,
         upload_url: &str,
     ) -> Result<()> {
-        self.output.detail(&format!("Uploading empty layer (0 bytes)"));
-        
+        self.output
+            .detail(&format!("Uploading empty layer (0 bytes)"));
+
         // For empty layers, we can use the chunked uploader with empty data
         let uploader = crate::upload::ChunkedUploader::new(3600, self.output.clone());
         let empty_data = Vec::new();
-        
-        uploader.upload_large_blob(
-            upload_url,
-            &empty_data,
-            &layer.digest,
-            token,
-        ).await
+
+        uploader
+            .upload_large_blob(upload_url, &empty_data, &layer.digest, token)
+            .await
     }
 
     fn supports_layer(&self, layer: &LayerInfo) -> bool {
@@ -88,21 +87,21 @@ impl UploadStrategy for RegularLayerStrategy {
         token: &Option<String>,
         upload_url: &str,
     ) -> Result<()> {
-        self.output.detail(&format!("Uploading regular layer: {} ({})", 
-            &layer.digest[..16], self.output.format_size(layer.size)));
-        
+        self.output.detail(&format!(
+            "Uploading regular layer: {} ({})",
+            &layer.digest[..16],
+            self.output.format_size(layer.size)
+        ));
+
         // Extract layer data from tar
         let layer_data = self.extract_layer_data(tar_path, &layer.tar_path).await?;
-        
+
         // Use chunked uploader
         let uploader = crate::upload::ChunkedUploader::new(self.timeout, self.output.clone());
-        
-        uploader.upload_large_blob(
-            upload_url,
-            &layer_data,
-            &layer.digest,
-            token,
-        ).await
+
+        uploader
+            .upload_large_blob(upload_url, &layer_data, &layer.digest, token)
+            .await
     }
 
     fn supports_layer(&self, layer: &LayerInfo) -> bool {
@@ -130,12 +129,15 @@ impl UploadStrategy for StreamingLayerStrategy {
         token: &Option<String>,
         upload_url: &str,
     ) -> Result<()> {
-        self.output.detail(&format!("Uploading large layer via streaming: {} ({})", 
-            &layer.digest[..16], self.output.format_size(layer.size)));
-        
+        self.output.detail(&format!(
+            "Uploading large layer via streaming: {} ({})",
+            &layer.digest[..16],
+            self.output.format_size(layer.size)
+        ));
+
         // Find layer offset (simplified - in real usage you'd cache this)
         let offset = self.find_layer_offset(tar_path, &layer.tar_path).await?;
-        
+
         // Use streaming uploader
         let streaming_uploader = crate::upload::StreamingUploader::new(
             reqwest::Client::new(),
@@ -144,18 +146,20 @@ impl UploadStrategy for StreamingLayerStrategy {
             self.output.clone(),
         );
 
-        streaming_uploader.upload_from_tar_entry(
-            tar_path,
-            &layer.tar_path,
-            offset,
-            layer.size,
-            upload_url,
-            &layer.digest,
-            token,
-            |_uploaded, _total| {
-                // Progress callback - could be enhanced
-            },
-        ).await
+        streaming_uploader
+            .upload_from_tar_entry(
+                tar_path,
+                &layer.tar_path,
+                offset,
+                layer.size,
+                upload_url,
+                &layer.digest,
+                token,
+                |_uploaded, _total| {
+                    // Progress callback - could be enhanced
+                },
+            )
+            .await
     }
 
     fn supports_layer(&self, layer: &LayerInfo) -> bool {

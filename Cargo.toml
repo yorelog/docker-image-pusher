@@ -2,6 +2,15 @@
 name = "docker-image-pusher"
 version = "0.2.0"
 edition = "2024"
+authors = ["yorelog <yorelog@gmail.com>"]
+description = "High-performance command-line tool for pushing Docker image tar packages directly to Docker registries"
+license = "MIT"
+repository = "https://github.com/yorelog/docker-image-pusher"
+homepage = "https://github.com/yorelog/docker-image-pusher"
+documentation = "https://docs.rs/docker-image-pusher"
+readme = "README.md"
+keywords = ["docker", "registry", "push", "container", "tar"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 reqwest = { version = "0.12.19", features = ["json"] }

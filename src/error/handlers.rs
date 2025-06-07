@@ -1,15 +1,19 @@
-//! Standardized error handling patterns to eliminate duplication
+//! Standardized error handling patterns
 
-use crate::error::{PusherError, Result};
+use crate::error::{RegistryError, Result};
 use reqwest::StatusCode;
 use std::time::Duration;
 
-/// Standard error handler for HTTP responses
+/// HTTP error handler for registry operations
 pub struct HttpErrorHandler;
 
 impl HttpErrorHandler {
     /// Handle upload-related HTTP errors with standardized messages
-    pub fn handle_upload_error(status: StatusCode, error_text: &str, context: &str) -> PusherError {
+    pub fn handle_upload_error(
+        status: StatusCode,
+        error_text: &str,
+        context: &str,
+    ) -> RegistryError {
         let error_msg = match status.as_u16() {
             400 => {
                 if error_text.contains("exist blob require digest") {
@@ -45,11 +49,11 @@ impl HttpErrorHandler {
             _ => format!("{} failed (status {}): {}", context, status, error_text),
         };
 
-        PusherError::Upload(error_msg)
+        RegistryError::Upload(error_msg)
     }
 
     /// Handle authentication-related HTTP errors
-    pub fn handle_auth_error(status: StatusCode, error_text: &str) -> PusherError {
+    pub fn handle_auth_error(status: StatusCode, error_text: &str) -> RegistryError {
         let error_msg = match status.as_u16() {
             400 => "Invalid token request parameters".to_string(),
             401 => "Invalid credentials provided".to_string(),
@@ -58,7 +62,7 @@ impl HttpErrorHandler {
             _ => format!("Authentication failed (status {}): {}", status, error_text),
         };
 
-        PusherError::Authentication(error_msg)
+        RegistryError::Auth(error_msg)
     }
 
     /// Handle registry-related HTTP errors
@@ -66,7 +70,7 @@ impl HttpErrorHandler {
         status: StatusCode,
         error_text: &str,
         operation: &str,
-    ) -> PusherError {
+    ) -> RegistryError {
         let error_msg = match status.as_u16() {
             401 => format!(
                 "Unauthorized to perform {} operation: {}",
@@ -83,11 +87,11 @@ impl HttpErrorHandler {
             _ => format!("{} failed (status {}): {}", operation, status, error_text),
         };
 
-        PusherError::Registry(error_msg)
+        RegistryError::Registry(error_msg)
     }
 
     /// Handle streaming upload specific errors
-    pub fn handle_streaming_error(status: StatusCode, error_text: &str) -> PusherError {
+    pub fn handle_streaming_error(status: StatusCode, error_text: &str) -> RegistryError {
         let error_msg = match status.as_u16() {
             400 => {
                 if error_text.contains("DIGEST_INVALID") {
@@ -118,7 +122,7 @@ impl HttpErrorHandler {
             ),
         };
 
-        PusherError::Upload(error_msg)
+        RegistryError::Upload(error_msg)
     }
 
     /// Check if error indicates a storage backend issue that might be temporary
@@ -141,20 +145,13 @@ pub struct NetworkErrorHandler;
 
 impl NetworkErrorHandler {
     /// Categorize and format network errors with helpful context
-    pub fn handle_network_error(error: &reqwest::Error, context: &str) -> PusherError {
+    pub fn handle_network_error(error: &reqwest::Error, context: &str) -> RegistryError {
         if error.is_timeout() {
-            PusherError::Timeout(format!("{} timeout: {}", context, error))
+            RegistryError::Network(format!("Timeout during {}", context))
         } else if error.is_connect() {
-            PusherError::Network(format!("Connection error during {}: {}", context, error))
-        } else if error.to_string().contains("dns") {
-            PusherError::Network(format!("DNS resolution error for {}: {}", context, error))
-        } else if error.to_string().contains("certificate") {
-            PusherError::Network(format!(
-                "TLS certificate error during {}: {}",
-                context, error
-            ))
+            RegistryError::Network(format!("Connection failed during {}", context))
         } else {
-            PusherError::Network(format!("{} network error: {}", context, error))
+            RegistryError::Network(format!("Network error during {}: {}", context, error))
         }
     }
 }
@@ -163,88 +160,16 @@ impl NetworkErrorHandler {
 pub struct ValidationErrorHandler;
 
 impl ValidationErrorHandler {
-    /// Standard file validation error messages
-    pub fn validate_file_path(file_path: &str) -> Result<()> {
-        use std::path::Path;
-
-        let path = Path::new(file_path);
-
-        if !path.exists() {
-            return Err(PusherError::Validation(format!(
-                "Input file does not exist: {}",
-                file_path
-            )));
+    /// Validate required fields
+    pub fn validate_required_field(field_name: &str, value: &Option<String>) -> Result<()> {
+        if value.is_none() || value.as_ref().unwrap().is_empty() {
+            Err(RegistryError::Validation(format!(
+                "{} is required",
+                field_name
+            )))
+        } else {
+            Ok(())
         }
-
-        if !path.is_file() {
-            return Err(PusherError::Validation(format!(
-                "Input path is not a file: {}",
-                file_path
-            )));
-        }
-
-        // Check file extension
-        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-
-        if !matches!(extension.to_lowercase().as_str(), "tar" | "tar.gz" | "tgz") {
-            return Err(PusherError::Validation(format!(
-                "Input file must be a tar archive (.tar, .tar.gz, or .tgz): {}",
-                file_path
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Standard URL validation
-    pub fn validate_repository_url(url: &str) -> Result<()> {
-        if url.is_empty() {
-            return Err(PusherError::Validation(
-                "Repository URL cannot be empty".to_string(),
-            ));
-        }
-
-        if !url.contains("://") {
-            return Err(PusherError::Validation(
-                "Repository URL must include protocol (http:// or https://)".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Standard credential validation
-    pub fn validate_credentials(
-        username: &Option<String>,
-        password: &Option<String>,
-    ) -> Result<()> {
-        match (username, password) {
-            (Some(_), None) => Err(PusherError::Validation(
-                "Password is required when username is provided".to_string(),
-            )),
-            (None, Some(_)) => Err(PusherError::Validation(
-                "Username is required when password is provided".to_string(),
-            )),
-            _ => Ok(()), // Both provided or both None is fine
-        }
-    }
-
-    /// Standard numeric range validation
-    pub fn validate_timeout(timeout: u64) -> Result<()> {
-        if timeout == 0 {
-            return Err(PusherError::Validation(
-                "Timeout must be greater than 0".to_string(),
-            ));
-        }
-
-        if timeout > 86400 {
-            // 24 hours
-            return Err(PusherError::Validation(
-                "Timeout cannot exceed 24 hours (86400 seconds)".to_string(),
-            ));
-        }
-
-        Ok(())
     }
 }
 
@@ -253,22 +178,27 @@ impl ValidationErrorHandler {
 macro_rules! with_context {
     ($result:expr, $context:expr) => {
         $result.map_err(|e| match e {
-            PusherError::Config(msg) => PusherError::Config(format!("{}: {}", $context, msg)),
-            PusherError::Authentication(msg) => {
-                PusherError::Authentication(format!("{}: {}", $context, msg))
+            RegistryError::Auth(msg) => RegistryError::Auth(format!("{}: {}", $context, msg)),
+            RegistryError::Network(msg) => RegistryError::Network(format!("{}: {}", $context, msg)),
+            RegistryError::Upload(msg) => RegistryError::Upload(format!("{}: {}", $context, msg)),
+            RegistryError::Io(msg) => RegistryError::Io(format!("{}: {}", $context, msg)),
+            RegistryError::Parse(msg) => RegistryError::Parse(format!("{}: {}", $context, msg)),
+            RegistryError::Registry(msg) => {
+                RegistryError::Registry(format!("{}: {}", $context, msg))
             }
-            PusherError::Network(msg) => PusherError::Network(format!("{}: {}", $context, msg)),
-            PusherError::Upload(msg) => PusherError::Upload(format!("{}: {}", $context, msg)),
-            PusherError::Io(msg) => PusherError::Io(format!("{}: {}", $context, msg)),
-            PusherError::Parse(msg) => PusherError::Parse(format!("{}: {}", $context, msg)),
-            PusherError::Registry(msg) => PusherError::Registry(format!("{}: {}", $context, msg)),
-            PusherError::ImageParsing(msg) => {
-                PusherError::ImageParsing(format!("{}: {}", $context, msg))
+            RegistryError::ImageParsing(msg) => {
+                RegistryError::ImageParsing(format!("{}: {}", $context, msg))
             }
-            PusherError::Validation(msg) => {
-                PusherError::Validation(format!("{}: {}", $context, msg))
+            RegistryError::Validation(msg) => {
+                RegistryError::Validation(format!("{}: {}", $context, msg))
             }
-            PusherError::Timeout(msg) => PusherError::Timeout(format!("{}: {}", $context, msg)),
+            RegistryError::Cache { message, path } => RegistryError::Cache {
+                message: format!("{}: {}", $context, message),
+                path,
+            },
+            RegistryError::NotFound(msg) => {
+                RegistryError::NotFound(format!("{}: {}", $context, msg))
+            }
         })
     };
 }

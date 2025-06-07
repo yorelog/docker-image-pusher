@@ -17,25 +17,43 @@
 //!
 //! # Examples
 //!
-//! Basic usage involves creating an `ImageParser`, passing it a tar reader, and calling `parse`:
+//! Basic usage involves creating an `ImageParser` and parsing a tar file:
 //!
 //! ```no_run
-//! use std::fs::File;
-//! use std::io::BufReader;
-//! use your_crate::image::{ImageParser, ImageInfo};
+//! use std::path::Path;
+//! use docker_image_pusher::image::ImageParser;
+//! use docker_image_pusher::logging::Logger;
 //!
-//! let file = File::open("path/to/image.tar")?;
-//! let reader = BufReader::new(file);
-//! let parser = ImageParser::new(reader);
-//! let image_info: ImageInfo = parser.parse()?;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let output = Logger::new(false);
+//! let mut parser = ImageParser::new(output);
+//! let image_info = parser.parse_tar_file(Path::new("path/to/image.tar")).await?;
 //! // Now you can access image metadata and layers
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! See the individual struct and enum documentation for more details on the available methods and fields.
-
+//!
+//! # Processing Docker Images
+//!
+//! This module also includes functionality for processing Docker images,
+//! such as extracting and handling image manifests and layer data.
 
 // This file defines the module for handling Docker images, including parsing and processing image tar packages.
 
+pub mod cache;
+pub mod digest;
+pub mod image_manager;
+pub mod manifest;
 pub mod parser;
 
-pub use parser::{ImageConfig, ImageInfo, ImageParser, LayerInfo};
+// Specific exports to avoid ambiguity
+pub use cache::Cache;
+pub use digest::DigestUtils;
+pub use image_manager::ImageManager;
+pub use manifest::{get_layers, is_gzipped, parse_manifest};
+pub use parser::{ImageInfo, ImageParser, LayerInfo};
+
+// Re-export ImageConfig only from parser to avoid ambiguity
+pub use parser::ImageConfig;

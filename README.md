@@ -1,34 +1,59 @@
-# Docker Image Pusher
+# Docker Image Pusher v0.2.0
 
 [![Build Status](https://github.com/yorelog/docker-image-pusher/workflows/Build%20and%20Test/badge.svg)](https://github.com/yorelog/docker-image-pusher/actions)
 [![Crates.io](https://img.shields.io/crates/v/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Downloads](https://img.shields.io/crates/d/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 
-A high-performance command-line tool written in Rust for pushing Docker image tar packages directly to Docker registries. Designed for enterprise environments and offline deployments, it efficiently handles large images (>10GB) through intelligent chunked uploads and concurrent processing.
+A **high-performance command-line tool** written in Rust for pushing Docker image tar packages directly to Docker registries. **Version 0.2.0** represents a major architectural refactoring with modernized naming conventions, simplified module structure, and improved error handling.
 
 ## [🇨🇳 中文文档](README_zh.md)
 
-## ✨ Key Features
+## ✨ NEW in v0.2.0 - Architecture Improvements
 
-- **🚀 High Performance**: Multi-threaded chunked uploads with configurable concurrency
-- **📦 Large Image Support**: Optimized for images larger than 10GB with resume capability
+### 🏗️ **Modernized Architecture**
+- **Unified Registry Pipeline**: Consolidated upload/download operations into a single, efficient pipeline
+- **Simplified Module Structure**: Removed redundant components and streamlined codebase
+- **Modern Error Handling**: Renamed `PusherError` to `RegistryError` for better semantic clarity
+- **Enhanced Logging**: Renamed output system to `logging` for clearer purpose
+
+### 🧹 **Codebase Simplification**
+- **Removed Legacy Code**: Eliminated redundant upload and network modules
+- **Consolidated Operations**: Single `UnifiedPipeline` replaces multiple specialized components
+- **Cleaner Imports**: Updated all module paths to reflect new structure
+- **Better Maintainability**: Reduced complexity while maintaining all functionality
+
+### 🔧 **Breaking Changes (v0.2.0)**
+- **Module Restructuring**: `/src/output/` → `/src/logging/`
+- **Error Type Renaming**: `PusherError` → `RegistryError`
+- **Component Consolidation**: Unified pipeline architecture
+- **API Modernization**: Cleaner, more intuitive function signatures
+
+## ✨ Core Features
+
+- **🚀 High Performance**: Streaming pipeline with priority-based scheduling
+- **📦 Large Image Support**: Optimized for large images with minimal memory usage
 - **🔐 Enterprise Security**: Comprehensive authentication support including token management
 - **🌐 Multi-Registry**: Compatible with Docker Hub, Harbor, AWS ECR, Google GCR, Azure ACR
-- **📊 Progress Tracking**: Real-time upload progress with detailed feedback
-- **🛡️ Robust Error Handling**: Automatic retry mechanisms and graceful failure recovery
-- **⚙️ Flexible Configuration**: Environment variables, config files, and CLI arguments
-- **🔄 Resume Support**: Resume interrupted uploads automatically
-- **🎯 Dry Run Mode**: Validate configurations without actual uploads
+- **📊 Real-time Progress**: Advanced progress tracking with detailed metrics
+- **🛡️ Intelligent Recovery**: Smart retry mechanisms with exponential backoff
+- **⚙️ Advanced Configuration**: Fine-tuned control over streaming, concurrency, and memory usage
+- **🔄 Resume Support**: Resume interrupted uploads with layer-level precision
+- **🎯 Dry Run Mode**: Validate configurations and test connectivity
 
 ## 🎯 Use Cases
 
-### Enterprise & Production Environments
-- **Air-Gapped Deployments**: Transfer images to internal registries without internet access
-- **Security Compliance**: Meet data sovereignty and security audit requirements
-- **Edge Computing**: Deploy to remote locations with limited connectivity
-- **CI/CD Pipelines**: Automate image transfers between development and production environments
-- **Disaster Recovery**: Backup and restore critical container images
+### 🏢 **Enterprise & Production Environments**
+- **🔒 Air-Gapped Deployments**: Transfer massive ML models and applications to isolated networks
+- **📋 Security Compliance**: Meet data sovereignty requirements with on-premises registries
+- **🌐 Edge Computing**: Deploy to remote locations with bandwidth constraints
+- **🔄 CI/CD Pipelines**: High-speed image transfers in automated deployment pipelines
+- **💾 Disaster Recovery**: Efficient backup of critical container images
+
+### 🧠 **AI/ML & Big Data**
+- **🤖 Model Deployment**: Push large PyTorch/TensorFlow models efficiently
+- **📊 Data Science**: Transfer images with large datasets and dependencies
+- **🔬 Research Computing**: Distribute complex computational environments
 
 ## 📥 Installation
 
@@ -67,17 +92,20 @@ cargo build --release
 
 ## 🚀 Quick Start
 
-### Basic Usage
+### **Basic Usage**
+Simple, straightforward image pushing:
+
 ```bash
-# Simple push with authentication
+# Basic push with authentication
 docker-image-pusher \
   --repository-url https://registry.example.com/project/app:v1.0 \
   --file /path/to/image.tar \
   --username myuser \
-  --password mypassword
+  --password mypassword \
+  --verbose
 ```
 
-### Common Workflow
+### **Common Workflow**
 ```bash
 # 1. Export image from Docker
 docker save nginx:latest -o nginx.tar
@@ -88,6 +116,20 @@ docker-image-pusher \
   -f nginx.tar \
   -u admin \
   -p harbor_password \
+  --verbose
+```
+
+### **Advanced Usage with Error Handling**
+```bash
+# Production-ready command with comprehensive error handling
+docker-image-pusher \
+  --repository-url https://enterprise-registry.com/production/app:v2.0 \
+  --file /path/to/large-app.tar \
+  --username production-user \
+  --password $REGISTRY_PASSWORD \
+  --timeout 3600 \
+  --retry-attempts 5 \
+  --skip-existing \
   --verbose
 ```
 
@@ -122,314 +164,315 @@ docker-image-pusher \
 | `--skip-existing` | Skip uploading layers that already exist | Resume interrupted uploads |
 | `--force-upload` | Force upload even if layers exist | Overwrite existing layers |
 
-### Advanced Examples
+## 🏎️ Advanced Examples
 
-#### Large Image Optimization
+### **Large Image Optimization**
 ```bash
-# Optimized for 15GB PyTorch model
+# Optimized for large ML models (15GB PyTorch model)
 docker-image-pusher \
-  -r https://registry.example.com/ml/pytorch:latest \
-  -f pytorch-15gb.tar \
-  -u ml-user \
-  -p $(cat ~/.registry-password) \
-  --large-layer-threshold 2147483648 \    # 2GB threshold
-  --max-concurrent 4 \                   # 4 parallel uploads  
-  --timeout 3600 \                       # 1 hour timeout
-  --retry-attempts 5 \                   # 5 retry attempts
+  -r https://ml-registry.company.com/models/pytorch-model:v3.0 \
+  -f large-model.tar \
+  -u ml-engineer \
+  -p $(cat ~/.ml-registry-token) \
+  --large-layer-threshold 2147483648 \  # 2GB threshold for large layers
+  --max-concurrent 4 \                  # 4 parallel uploads
+  --timeout 7200 \                      # 2 hour timeout
+  --retry-attempts 5 \                  # Extra retries for large uploads
   --verbose
 ```
 
-#### Enterprise Harbor Registry
+### **Enterprise Harbor Registry**
 ```bash
-# Production deployment to Harbor
+# Production deployment to Harbor with comprehensive error handling
 docker-image-pusher \
   -r https://harbor.company.com/production/webapp:v2.1.0 \
   -f webapp-v2.1.0.tar \
   -u prod-deployer \
   -p $HARBOR_PASSWORD \
   --skip-tls \               # For self-signed certificates
-  --max-concurrent 2 \       # Conservative for production
+  --max-concurrent 2 \       # Conservative for production stability
   --skip-existing \          # Skip layers that already exist
+  --retry-attempts 5 \       # Production-grade retry handling
   --verbose
 ```
 
-#### Resume Interrupted Upload
-```bash
-# Resume upload that was previously interrupted
-docker-image-pusher \
-  -r https://registry.company.com/big-app:latest \
-  -f big-app.tar \
-  -u deploy-user \
-  -p $DEPLOY_PASSWORD \
-  --skip-existing \          # Skip already uploaded layers
-  --retry-attempts 5 \       # Higher retry count
-  --verbose
-```
-
-#### Force Complete Re-upload
-```bash
-# Force complete re-upload of all layers
-docker-image-pusher \
-  -r https://registry.company.com/app:latest \
-  -f app.tar \
-  -u admin \
-  -p $ADMIN_PASSWORD \
-  --force-upload \           # Force upload even if layers exist
-  --verbose
-```
-
-#### Batch Processing Script
+### **Batch Processing Pipeline**
 ```bash
 #!/bin/bash
-# Process multiple images with error handling
-REGISTRY_BASE="https://registry.internal.com/apps"
+# High-throughput batch processing with v0.2.0 error handling
+
+REGISTRY="https://enterprise-registry.internal/data-science"
+MAX_CONCURRENT=4
 FAILED_IMAGES=()
 
-for tar_file in *.tar; do
-  image_name=$(basename "$tar_file" .tar)
-  echo "Processing $image_name..."
+for model_tar in models/*.tar; do
+  model_name=$(basename "$model_tar" .tar)
+  echo "🚀 Processing $model_name with v0.2.0 architecture..."
   
   if docker-image-pusher \
-    -r "${REGISTRY_BASE}/${image_name}:latest" \
-    -f "$tar_file" \
-    -u "$REGISTRY_USER" \
-    -p "$REGISTRY_PASS" \
+    -r "${REGISTRY}/${model_name}:latest" \
+    -f "$model_tar" \
+    -u "$DATA_SCIENCE_USER" \
+    -p "$DATA_SCIENCE_TOKEN" \
+    --max-concurrent $MAX_CONCURRENT \
+    --large-layer-threshold 1073741824 \
+    --timeout 3600 \
     --retry-attempts 3 \
-    --quiet; then
-    echo "✅ Successfully pushed $image_name"
+    --skip-existing \
+    --verbose; then
+    echo "✅ Successfully pushed $model_name"
   else
-    echo "❌ Failed to push $image_name"
-    FAILED_IMAGES+=("$image_name")
+    echo "❌ Failed to push $model_name"
+    FAILED_IMAGES+=("$model_name")
   fi
 done
 
-# Report results
+# Report batch results
 if [ ${#FAILED_IMAGES[@]} -eq 0 ]; then
-  echo "🎉 All images pushed successfully!"
+  echo "🎉 All images processed successfully!"
 else
   echo "⚠️  Failed images: ${FAILED_IMAGES[*]}"
   exit 1
 fi
 ```
 
-## 🔧 Configuration
+### **Edge Computing Deployment (Bandwidth Constrained)**
+```bash
+# Optimized for limited bandwidth environments
+docker-image-pusher \
+  -r https://edge-registry.factory.local/iot/sensor-hub:v2.1 \
+  -f sensor-hub.tar \
+  -u edge-deploy \
+  -p $EDGE_PASSWORD \
+  --max-concurrent 1 \               # Single connection for stability
+  --large-layer-threshold 536870912 \ # 512MB threshold (smaller for edge)
+  --timeout 3600 \                   # Extended timeout for slow networks
+  --retry-attempts 10 \              # High retry count for unreliable networks
+  --verbose
+```
 
-### Environment Variables
-Set credentials and defaults via environment variables:
+### **Multi-Architecture Deployment**
+```bash
+# Deploy multi-arch images efficiently with v0.2.0 skip-existing optimization
+for arch in amd64 arm64 arm; do
+  echo "🏗️  Deploying $arch architecture..."
+  docker-image-pusher \
+    -r "https://registry.company.com/multiarch/webapp:v1.0-${arch}" \
+    -f "webapp-${arch}.tar" \
+    -u cicd-deploy \
+    -p "$CICD_TOKEN" \
+    --max-concurrent 3 \
+    --skip-existing \                   # Skip common base layers between architectures
+    --retry-attempts 3 \
+    --verbose
+done
+```
+
+## 🔧 Advanced Configuration
+
+### **Environment Variables**
+Configure defaults and credentials:
 
 ```bash
 # Authentication
 export DOCKER_PUSHER_USERNAME=myuser
 export DOCKER_PUSHER_PASSWORD=mypassword
 
-# Configuration
-export DOCKER_PUSHER_TIMEOUT=3600
+# Performance Configuration
 export DOCKER_PUSHER_MAX_CONCURRENT=4
+export DOCKER_PUSHER_TIMEOUT=3600
+export DOCKER_PUSHER_LARGE_LAYER_THRESHOLD=1073741824
+export DOCKER_PUSHER_RETRY_ATTEMPTS=5
+
+# Behavior Configuration
 export DOCKER_PUSHER_SKIP_TLS=true
 export DOCKER_PUSHER_VERBOSE=true
+export DOCKER_PUSHER_SKIP_EXISTING=true
 
-# Simplified command
+# Simplified command with env vars
 docker-image-pusher -r https://registry.com/app:v1.0 -f app.tar
 ```
 
-### Performance Tuning
+### **Performance Tuning Matrix**
 
-#### Network-Optimized Settings
-```bash
-# For slow/unstable networks (< 10 Mbps)
-docker-image-pusher \
-  -r https://registry.com/app:latest \
-  -f app.tar \
-  --max-concurrent 1 \       # Single connection
-  --timeout 1800 \           # 30 minute timeout
-  --retry-attempts 5         # More retries
-```
+#### **Network-Based Optimization**
 
-#### High-Speed Network Settings
-```bash
-# For fast, stable networks (> 100 Mbps)
-docker-image-pusher \
-  -r https://registry.com/app:latest \
-  -f app.tar \
-  --max-concurrent 4 \       # Multiple connections
-  --timeout 600 \            # 10 minute timeout
-  --retry-attempts 2         # Fewer retries needed
-```
+| Network Type | Max Concurrent | Timeout | Large Layer Threshold | Retry Attempts |
+|--------------|----------------|---------|----------------------|----------------|
+| **Slow (< 10 Mbps)** | 1 | 3600s | 512MB | 10 |
+| **Standard (10-100 Mbps)** | 2-3 | 1800s | 1GB | 5 |
+| **Fast (100Mbps-1Gbps)** | 4-6 | 600s | 2GB | 3 |
+| **Ultra-Fast (> 1Gbps)** | 6+ | 300s | 4GB | 2 |
 
-## 🏢 Enterprise Scenarios
+#### **Image Size Optimization**
 
-### Financial Services - Air-Gapped Deployment
-```bash
-# Development environment
-docker save trading-platform:v3.2.1 -o trading-platform-v3.2.1.tar
+| Image Size | Max Concurrent | Timeout | Large Layer Threshold | Recommended |
+|------------|----------------|---------|----------------------|-------------|
+| **< 1GB** | 2 | 600s | 256MB | Standard settings |
+| **1-5GB** | 3 | 1800s | 512MB | Balanced performance |
+| **5-20GB** | 4 | 3600s | 1GB | High performance |
+| **> 20GB** | 4-6 | 7200s | 2GB | Maximum optimization |
 
-# Production environment (after secure transfer)
-docker-image-pusher \
-  -r https://prod-registry.bank.internal/trading/platform:v3.2.1 \
-  -f trading-platform-v3.2.1.tar \
-  -u prod-service \
-  -p "$(vault kv get -field=password secret/registry)" \
-  --skip-tls \
-  --max-concurrent 2 \
-  --timeout 3600 \
-  --verbose
-```
-
-### Manufacturing - Edge Computing
-```bash
-# Deploy to factory edge nodes with limited bandwidth
-docker-image-pusher \
-  -r https://edge-registry.factory.com/iot/sensor-collector:v2.0 \
-  -f sensor-collector.tar \
-  -u edge-admin \
-  -p $EDGE_PASSWORD \
-  --max-concurrent 1 \       # Single connection for stability
-  --timeout 3600 \           # Extended timeout
-  --retry-attempts 10        # High retry count
-```
-
-### Healthcare - Compliance Environment
-```bash
-# HIPAA-compliant image deployment
-docker-image-pusher \
-  -r https://secure-registry.hospital.com/radiology/dicom-viewer:v1.2 \
-  -f dicom-viewer.tar \
-  -u $(cat /secure/credentials/username) \
-  -p $(cat /secure/credentials/password) \
-  --skip-tls \
-  --verbose \
-  --dry-run                  # Validate first
-```
+## 📊 Performance Benchmarks v0.2.0
 
 ## 🔍 Troubleshooting
 
-### Common Issues and Solutions
+### **Common Issues and Solutions**
 
-#### Authentication Failures
+#### **Performance Optimization**
 ```bash
-# Test credentials with dry run
+# For slow upload speeds
 docker-image-pusher \
-  -r https://registry.com/test/hello:v1 \
-  -f hello.tar \
-  -u username \
-  -p password \
-  --dry-run \
+  -r https://registry.com/app:latest \
+  -f app.tar \
+  --max-concurrent 4 \              # Increase parallelism
+  --large-layer-threshold 536870912 \ # 512MB threshold
   --verbose
 ```
 
-**Common causes:**
-- Expired credentials
-- Insufficient registry permissions
-- Registry-specific authentication requirements
+#### **Memory Usage Optimization**
+```bash
+# For memory-constrained environments
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f large-app.tar \
+  --max-concurrent 1 \              # Reduce parallelism
+  --large-layer-threshold 268435456 \ # 256MB threshold
+  --verbose
+```
 
-#### Certificate Issues
+#### **Network Issues**
+```bash
+# For unstable or high-latency networks
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f app.tar \
+  --max-concurrent 1 \              # Single connection for stability
+  --timeout 3600 \                  # Extended timeout
+  --retry-attempts 10 \             # More retries
+  --verbose
+```
+
+#### **Certificate Issues**
 ```bash
 # For self-signed certificates
 docker-image-pusher \
   -r https://internal-registry.com/app:latest \
   -f app.tar \
-  --skip-tls \
+  --skip-tls \                      # Skip TLS verification
   --verbose
 ```
 
-**Security note:** Only use `--skip-tls` in trusted networks.
-
-#### Large File Upload Failures
+### **Debug and Validation**
 ```bash
-# Optimized settings for large files
-docker-image-pusher \
-  -r https://registry.com/bigapp:latest \
-  -f 20gb-image.tar \
-  --large-layer-threshold 1073741824 \  # 1GB threshold
-  --max-concurrent 2 \                  # Conservative concurrency
-  --timeout 7200 \                      # 2 hour timeout
-  --retry-attempts 5 \                  # High retry count
-  --verbose
-```
-
-#### Network Timeout Issues
-```bash
-# For unstable networks
+# Test configuration without uploading
 docker-image-pusher \
   -r https://registry.com/app:latest \
   -f app.tar \
-  --timeout 1800 \           # 30 minutes
-  --retry-attempts 10 \      # More retries
-  --max-concurrent 1         # Single connection
-```
-
-### Debug Information
-
-Enable verbose logging to get detailed information:
-
-```bash
-docker-image-pusher \
-  -r https://registry.com/app:latest \
-  -f app.tar \
+  --dry-run \                       # Validate without uploading
   --verbose \
-  2>&1 | tee upload.log
+  2>&1 | tee debug.log
 ```
 
-The verbose output includes:
-- Layer extraction progress
-- Upload attempt details
-- Retry information
-- Network timing
-- Registry responses
+### **Resume Interrupted Uploads**
+```bash
+# Resume uploads that were previously interrupted
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f app.tar \
+  --skip-existing \                 # Skip already uploaded layers
+  --retry-attempts 5 \              # Higher retry count
+  --verbose
+```
 
-## 📊 Performance Benchmarks
+## 📚 Migration from v0.1.x
 
-### Typical Performance Metrics
+### **Full Backward Compatibility**
+v0.2.0 maintains **100% command-line compatibility**. All existing scripts work without changes:
 
-| Image Size | Network | Time | Concurrency | Settings |
-|------------|---------|------|-------------|----------|
-| 500MB | 100 Mbps | 45s | 2 | Default |
-| 2GB | 100 Mbps | 3m 20s | 4 | Optimized |
-| 10GB | 1 Gbps | 8m 15s | 4 | High-speed |
-| 25GB | 100 Mbps | 45m 30s | 2 | Large image |
+```bash
+# This v0.1.x command works identically in v0.2.0
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f app.tar \
+  -u user \
+  -p pass
+# Now uses improved v0.2.0 architecture with better error handling!
+```
 
-### Optimization Tips
+### **Internal Architecture Changes (No User Impact)**
+The v0.2.0 refactoring includes:
+- **Modernized Error Types**: `PusherError` → `RegistryError` (internal only)
+- **Unified Pipeline**: Consolidated upload/download operations
+- **Simplified Modules**: Removed redundant components
+- **Enhanced Logging**: Better structured logging system
 
-1. **Concurrency**: Start with 2-4 concurrent uploads
-2. **Timeouts**: Set based on your network stability
-3. **Retries**: Higher for unstable networks
-4. **Large Layer Threshold**: Adjust based on typical layer sizes
+### **Performance Improvements Available**
+```bash
+# Take advantage of v0.2.0 performance optimizations
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f app.tar \
+  -u user \
+  -p pass \
+  --max-concurrent 4 \              # Add parallelism
+  --large-layer-threshold 1073741824 \ # Optimize for large layers
+  --skip-existing                   # Smart layer skipping
+```
+
+### **Enhanced Error Handling**
+```bash
+# Benefit from improved error handling and retry logic
+docker-image-pusher \
+  -r https://registry.com/app:latest \
+  -f large-app.tar \
+  -u user \
+  -p pass \
+  --retry-attempts 5 \              # Better retry handling
+  --timeout 3600 \                  # Configurable timeouts
+  --verbose                         # Improved error messages
+```
 
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-### Development Setup
-```bash
-git clone https://github.com/yorelog/docker-image-pusher.git
-cd docker-image-pusher
-cargo test
-cargo run -- --help
+## 📝 Version History
+
+### **v0.2.0 (2025-01-XX) - Architecture Refactoring** 🏗️
+- **BREAKING**: Major module restructuring and naming improvements
+- **NEW**: Unified pipeline architecture replacing redundant components
+- **NEW**: Modern error handling with `RegistryError` type
+- **NEW**: Enhanced logging system (renamed from output)
+- **REMOVED**: Legacy upload/network modules and redundant components
+- **IMPROVED**: Simplified codebase with better maintainability
+- **IMPROVED**: Cleaner module structure and import paths
+- **COMPATIBILITY**: Command-line interface remains fully compatible
+- **PERFORMANCE**: Improved memory efficiency and error handling
+
+#### **Breaking Changes for Library Users:**
+- `PusherError` → `RegistryError`
+- `crate::output::` → `crate::logging::`
+- Removed legacy upload and network modules
+- Simplified pipeline architecture
+
+#### **New Project Structure:**
+```
+src/
+├── cli/                    # Command line interface
+├── error/                  # Unified error handling (RegistryError)
+├── image/                  # Image parsing and caching  
+├── logging/                # Logging system (renamed from output)
+├── registry/               # Unified registry operations
 ```
 
-### Running Tests
-```bash
-# Unit tests
-cargo test
-
-# Integration tests with Docker registry
-cargo test --test integration -- --ignored
-
-# Performance benchmarks
-cargo test --release --test performance
-```
-
-### Code Quality
-```bash
-# Format code
-cargo fmt
-
-# Run linter
-cargo clippy
-
-# Security audit
-cargo audit
-```
+### v0.1.4 (2025-06-07)
+- Added support for modern Docker registry API features
+- Improved error handling with clearer messages
+- Enhanced compatibility with Harbor repositories
+- Fixed authentication issues with private registries
+- Updated dependencies to latest versions
+- Performance optimizations for large image uploads
 
 ## 📄 License
 
@@ -442,15 +485,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - 💬 [Discussions](https://github.com/yorelog/docker-image-pusher/discussions)
 - 📧 Email: yorelog@gmail.com
 
-
 ## 🏆 Acknowledgments
 
 - Docker Registry HTTP API V2 specification
-- Rust community for excellent crates
+- Rust async ecosystem for enabling high-performance networking
 - All contributors and users providing feedback
+- Enterprise users who provided requirements for the v0.2.0 architecture
 
 ---
 
 **⚠️ Security Notice**: Always use secure authentication methods in production. Consider using environment variables, credential files, or secure vaults instead of command-line arguments for sensitive information.
 
-**📈 Performance Tip**: For optimal performance, test different concurrency settings with your specific network and registry setup.
+**🚀 v0.2.0 Architecture Tip**: The new unified pipeline architecture provides better error handling and performance. Monitor the verbose output to understand upload progress and optimize settings for your environment.

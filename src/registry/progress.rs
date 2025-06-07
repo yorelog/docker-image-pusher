@@ -1,6 +1,6 @@
 //! Progress tracking for uploads
 
-use crate::output::OutputManager;
+use crate::logging::Logger;
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -9,12 +9,12 @@ pub struct ProgressTracker {
     start_time: Instant,
     last_update: Instant,
     last_uploaded: u64,
-    output: OutputManager,
+    output: Logger,
     operation_name: String,
 }
 
 impl ProgressTracker {
-    pub fn new(total_size: u64, output: OutputManager, operation_name: String) -> Self {
+    pub fn new(total_size: u64, output: Logger, operation_name: String) -> Self {
         Self {
             total_size,
             start_time: Instant::now(),
@@ -36,16 +36,32 @@ impl ProgressTracker {
             || uploaded - self.last_uploaded >= size_threshold
             || uploaded == self.total_size
         {
-            self.output
-                .progress_with_metrics(uploaded, self.total_size, &self.operation_name);
+            let percent = (uploaded as f64 / self.total_size as f64 * 100.0) as u8;
+            let speed = if elapsed_since_last.as_secs() > 0 {
+                (uploaded - self.last_uploaded) / elapsed_since_last.as_secs()
+            } else {
+                0
+            };
+            self.output.progress(&format!(
+                "{}: {}% ({}/{}) - {} MB/s",
+                self.operation_name,
+                percent,
+                self.output.format_size(uploaded),
+                self.output.format_size(self.total_size),
+                speed / 1024 / 1024
+            ));
             self.last_update = now;
             self.last_uploaded = uploaded;
         }
     }
 
     pub fn finish(&self) {
-        self.output
-            .progress_with_metrics(self.total_size, self.total_size, &self.operation_name);
+        self.output.progress(&format!(
+            "{}: 100% ({}/{})",
+            self.operation_name,
+            self.output.format_size(self.total_size),
+            self.output.format_size(self.total_size)
+        ));
 
         let total_elapsed = self.start_time.elapsed();
         let avg_speed = if total_elapsed.as_secs() > 0 {

@@ -3,94 +3,67 @@
 //! This tool allows you to push Docker images to registries with optimized
 //! handling for large layers and improved error reporting.
 
-use docker_image_pusher::cli::{args::Args, runner::Runner};
-use docker_image_pusher::error::PusherError;
+use docker_image_pusher::cli::args::Args;
+use docker_image_pusher::cli::runner::Runner;
+use docker_image_pusher::error::{RegistryError, Result};
+use docker_image_pusher::logging::Logger;
 
 #[tokio::main]
-async fn main() {
-    // Parse command line arguments (clap will handle errors and exit on failure)
-    let args = Args::parse();
-
-    // Validate arguments
-    if let Err(e) = args.validate() {
-        eprintln!("❌ Validation error: {}", e);
-
-        // Add helpful hints for new flags
-        if e.to_string().contains("skip-existing") || e.to_string().contains("force-upload") {
-            eprintln!("💡 Use --skip-existing to avoid uploading layers that already exist");
-            eprintln!("   Use --force-upload to upload all layers regardless of existence");
-            eprintln!("   These flags are mutually exclusive");
-        }
-
-        std::process::exit(1);
-    }
-
-    // Create and run the runner
-    match Runner::new(args) {
-        Ok(runner) => {
-            if let Err(e) = runner.run().await {
-                eprintln!("❌ Error: {}", e);
-
-                // Enhanced error reporting based on error type
-                match e {
-                    PusherError::Validation(msg) => {
-                        eprintln!("💡 Please check your command line arguments");
-                        eprintln!("   {}", msg);
-                    }
-                    PusherError::Io(msg) => {
-                        eprintln!("💡 File system error occurred");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Please check file permissions and available disk space");
-                    }
-                    PusherError::Network(msg) => {
-                        eprintln!("💡 Network connectivity issue");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Please check your internet connection and registry URL");
-                    }
-                    PusherError::Authentication(msg) => {
-                        eprintln!("💡 Authentication failed");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Please check your credentials and registry permissions");
-                    }
-                    PusherError::Registry(msg) => {
-                        eprintln!("💡 Registry error");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Please check registry availability and configuration");
-                    }
-                    PusherError::Upload(msg) => {
-                        eprintln!("💡 Upload failed");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Consider retrying or checking registry storage limits");
-                    }
-                    PusherError::ImageParsing(msg) => {
-                        eprintln!("💡 Image parsing error");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Please verify the Docker image file is valid");
-                    }
-                    PusherError::Parse(msg) => {
-                        eprintln!("💡 Data parsing error");
-                        eprintln!("   {}", msg);
-                    }
-                    PusherError::Config(msg) => {
-                        eprintln!("💡 Configuration error");
-                        eprintln!("   {}", msg);
-                    }
-                    PusherError::Timeout(msg) => {
-                        eprintln!("💡 Operation timed out");
-                        eprintln!("   {}", msg);
-                        eprintln!("   Consider increasing the timeout value with --timeout option");
-                        eprintln!("   or check network stability for large file uploads");
-                    }
-                }
-
-                std::process::exit(1);
-            }
-
-            // Success - no need to print anything here as Runner will handle success output
-        }
+async fn main() -> Result<()> {
+    // Parse arguments early to handle help/version
+    let args = match Args::try_parse() {
+        Ok(args) => args,
         Err(e) => {
-            eprintln!("❌ Failed to initialize: {}", e);
+            eprintln!("❌ Error parsing arguments: {}", e);
             std::process::exit(1);
         }
+    };
+
+    // Get verbose setting from command
+    let verbose = extract_verbose_flag(&args);
+    let logger = Logger::new(verbose);
+
+    // Run the application
+    match run_app(args, logger).await {
+        Ok(()) => {
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("❌ Application error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_app(args: Args, logger: Logger) -> Result<()> {
+    // Validate arguments
+    args.validate()?;
+
+    // Create and run the application
+    let runner = Runner::new(logger.verbose);
+    runner.run(args).await.map_err(|e| {
+        // Add context to any errors that occur during execution
+        match e {
+            RegistryError::Network(msg) => {
+                RegistryError::Network(format!("Network operation failed: {}", msg))
+            }
+            RegistryError::Auth(msg) => {
+                RegistryError::Auth(format!("Authentication failed: {}", msg))
+            }
+            other => other,
+        }
+    })
+}
+
+fn extract_verbose_flag(args: &Args) -> bool {
+    match &args.command {
+        Some(command) => match command {
+            docker_image_pusher::cli::args::Commands::Pull(pull_args) => pull_args.verbose,
+            docker_image_pusher::cli::args::Commands::Extract(extract_args) => extract_args.verbose,
+            docker_image_pusher::cli::args::Commands::Push(push_args) => push_args.verbose,
+            docker_image_pusher::cli::args::Commands::List(_) => false,
+            docker_image_pusher::cli::args::Commands::Clean(_) => false,
+        },
+        None => false,
     }
 }

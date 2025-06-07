@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Downloads](https://img.shields.io/crates/d/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 
-A **high-performance command-line tool** written in Rust for pushing Docker image tar packages directly to Docker registries. **Version 0.2.0** represents a major architectural refactoring with modernized naming conventions, simplified module structure, and improved error handling.
+A **high-performance command-line tool** written in Rust for pushing Docker image tar packages directly to Docker registries. **Version 0.2.2** represents a major architectural refactoring with modernized naming conventions, simplified module structure, and improved error handling.
 
 ## [🇨🇳 中文文档](README_zh.md)
 

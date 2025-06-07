@@ -32,6 +32,16 @@ jobs:
         
     - name: Run cargo test
       run: cargo test --verbose
+    
+    - name: Configure Cargo for publishing
+      run: |
+        cargo login ${{ secrets.CARGO_TOKEN }}
+        
+    - name: Publish to Crates.io
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: cargo publish --verbose
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
 
   build:
     name: Build Release
@@ -78,43 +88,13 @@ jobs:
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: docker-image-pusher-${{ matrix.target }}
+        name: docker-image-pusher-${{ matrix.target }}-${{ matrix.os }}
         path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
 
-  publish:
-    name: Publish to Crates.io
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
-    - name: Configure Cargo for publishing
-      run: |
-        cargo login ${{ secrets.CARGO_TOKEN }}
-        
-    - name: Publish to Crates.io
-      run: cargo publish --verbose
-      env:
-        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
 
   release:
     name: Create Release
-    needs: [build, publish]
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     
@@ -131,16 +111,17 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          artifacts/docker-image-pusher-x86_64-unknown-linux-gnu/docker-image-pusher
-          artifacts/docker-image-pusher-x86_64-pc-windows-msvc/docker-image-pusher.exe
-          artifacts/docker-image-pusher-x86_64-apple-darwin/docker-image-pusher
-          artifacts/docker-image-pusher-aarch64-apple-darwin/docker-image-pusher
+          artifacts/docker-image-pusher-x86_64-unknown-linux-gnu-ubuntu-latest/docker-image-pusher
+          artifacts/docker-image-pusher-x86_64-pc-windows-msvc-windows-latest/docker-image-pusher.exe
+          artifacts/docker-image-pusher-x86_64-apple-darwin-macos-latest/docker-image-pusher
+          artifacts/docker-image-pusher-aarch64-apple-darwin-macos-latest/docker-image-pusher
         body: |
           ## Docker Image Pusher ${{ github.ref_name }}
           
-          🎉 **Major Architecture Refactoring (v0.2.0)** - This release represents a significant architectural improvement with modernized naming conventions, simplified module structure, and enhanced error handling.
+          🎉 **Major Architecture Refactoring (v0.2.2)** - This release represents a significant architectural improvement with modernized naming conventions, simplified module structure, and enhanced error handling.
           
-          ### ✨ New in v0.2.0
+          ### ✨ New in v0.2.2
+          - **Optimized Workflow**: Crates.io publishing now happens immediately after tests
           - **Unified Registry Pipeline**: Consolidated upload/download operations into a single, efficient pipeline
           - **Modern Error Handling**: Renamed `PusherError` to `RegistryError` for better semantic clarity
           - **Enhanced Logging**: Reorganized logging system for clearer purpose
@@ -182,7 +163,7 @@ jobs:
           - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)
           
           ### 🔧 Migration from v0.1.x
-          v0.2.0 maintains **100% command-line compatibility**. All existing scripts work without changes while benefiting from the improved architecture.
+          v0.2.2 maintains **100% command-line compatibility**. All existing scripts work without changes while benefiting from the improved architecture.
           
           ### 📚 Documentation
           - [English README](https://github.com/yorelog/docker-image-pusher/blob/main/README.md)

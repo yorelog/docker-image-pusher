@@ -152,7 +152,7 @@ jobs:
     name: Create Release
     needs: build-all
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     
     steps:
     - name: Checkout repository
@@ -175,15 +175,17 @@ jobs:
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
+        tag_name: ${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_number) || github.ref_name }}
+        name: ${{ github.event_name == 'workflow_dispatch' && format('Manual Release #{0}', github.run_number) || format('Docker Image Pusher {0}', github.ref_name) }}
         files: |
           release-files/docker-image-pusher-linux-x64
           release-files/docker-image-pusher-windows-x64.exe
           release-files/docker-image-pusher-macos-x64
           release-files/docker-image-pusher-macos-arm64
         body: |
-          ## Docker Image Pusher ${{ github.ref_name }}
+          ## Docker Image Pusher ${{ github.event_name == 'workflow_dispatch' && format('Manual Build #{0}', github.run_number) || github.ref_name }}
           
-          🎉 **Major Architecture Refactoring (v0.2.2)** - This release represents a significant architectural improvement with modernized naming conventions, simplified module structure, and enhanced error handling.
+          ${{ github.event_name == 'workflow_dispatch' && '🔧 **Manual Release** - This is a manually triggered build for testing purposes.' || '🎉 **Major Architecture Refactoring (v0.2.2)** - This release represents a significant architectural improvement with modernized naming conventions, simplified module structure, and enhanced error handling.' }}
           
           ### ✨ New in v0.2.2
           - **Optimized Workflow**: Crates.io publishing now happens immediately after tests
@@ -233,7 +235,7 @@ jobs:
           ### 📚 Documentation
           - [English README](https://github.com/yorelog/docker-image-pusher/blob/main/README.md)
           - [中文文档](https://github.com/yorelog/docker-image-pusher/blob/main/README_zh.md)
-        draft: false
-        prerelease: false
+        draft: ${{ github.event_name == 'workflow_dispatch' }}
+        prerelease: ${{ github.event_name == 'workflow_dispatch' }}
       env:
         GITHUB_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}

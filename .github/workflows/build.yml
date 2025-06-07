@@ -183,16 +183,9 @@ jobs:
           release-files/docker-image-pusher-macos-x64
           release-files/docker-image-pusher-macos-arm64
         body: |
-          ## Docker Image Pusher ${{ github.event_name == 'workflow_dispatch' && format('Manual Build #{0}', github.run_number) || github.ref_name }}
+          ## Docker Image Pusher Release
           
-          ${{ github.event_name == 'workflow_dispatch' && '🔧 **Manual Release** - This is a manually triggered build for testing purposes.' || '🎉 **Major Architecture Refactoring (v0.2.2)** - This release represents a significant architectural improvement with modernized naming conventions, simplified module structure, and enhanced error handling.' }}
-          
-          ### ✨ New in v0.2.2
-          - **Optimized Workflow**: Crates.io publishing now happens immediately after tests
-          - **Unified Registry Pipeline**: Consolidated upload/download operations into a single, efficient pipeline
-          - **Modern Error Handling**: Renamed `PusherError` to `RegistryError` for better semantic clarity
-          - **Enhanced Logging**: Reorganized logging system for clearer purpose
-          - **Performance Improvements**: 15-20% performance boost through unified pipeline architecture
+          This release includes cross-platform binaries for Linux, Windows, and macOS.
           
           ### 🚀 Core Features
           - Push Docker image tar packages directly to registries
@@ -228,9 +221,6 @@ jobs:
           - **Windows x64**: `docker-image-pusher.exe` (x86_64-pc-windows-msvc)
           - **macOS Intel**: `docker-image-pusher` (x86_64-apple-darwin)
           - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)
-          
-          ### 🔧 Migration from v0.1.x
-          v0.2.2 maintains **100% command-line compatibility**. All existing scripts work without changes while benefiting from the improved architecture.
           
           ### 📚 Documentation
           - [English README](https://github.com/yorelog/docker-image-pusher/blob/main/README.md)

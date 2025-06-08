@@ -33,18 +33,6 @@ oci-client = "0.15.0"
 
 
 [[example]]
-name = "comprehensive_demo"
-path = "examples/comprehensive_demo.rs"
-
-[[example]]
-name = "optimized_upload_demo"
-path = "examples/optimized_upload_demo.rs"
-
-[[example]]
-name = "oci_client_integration_demo"
-path = "examples/oci_client_integration_demo.rs"
-
-[[example]]
 name = "concurrency_monitoring_demo"
 path = "examples/concurrency_monitoring_demo.rs"
 

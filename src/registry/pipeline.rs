@@ -144,14 +144,12 @@ impl Default for UploadConfig {
 
 /// Simplified uploader
 pub struct Uploader {
-    logger: Logger,
     config: UploadConfig,
 }
 
 impl Uploader {
-    pub fn new(logger: Logger) -> Self {
+    pub fn new(_logger: Logger) -> Self {
         Self {
-            logger,
             config: UploadConfig::default(),
         }
     }
@@ -164,12 +162,11 @@ impl Uploader {
 
 /// Basic registry coordinator  
 pub struct RegistryCoordinator {
-    logger: Logger,
 }
 
 impl RegistryCoordinator {
-    pub fn new(logger: Logger) -> Self {
-        Self { logger }
+    pub fn new(_logger: Logger) -> Self {
+        Self { }
     }
 }
 

@@ -298,11 +298,13 @@ impl BlobHandler {
             // Large blobs get highest priority (lowest numbers) - big blobs first
             1
         } else if size > small_blob_threshold {
-            // Medium blobs get medium priority
-            small_blob_threshold - size
+            // Medium blobs get medium priority - use size-based ordering
+            // Larger medium blobs get lower priority numbers (higher priority)
+            2 + (self.pipeline_config.large_layer_threshold - size) / 1024
         } else {
             // Small blobs get lowest priority (highest numbers)
-            self.pipeline_config.large_layer_threshold + (small_blob_threshold - size)
+            // Smaller blobs get higher priority numbers (lower priority)
+            1000 + (small_blob_threshold - size) / 1024
         }
     }
 
@@ -323,8 +325,9 @@ impl BlobHandler {
         let start_time = std::time::Instant::now();
         
         logger.detail(&format!(
-            "Upload task {}: Processing blob {} ({}) - priority {}",
+            "Upload task {}: Processing {} blob {} ({}) - priority {}",
             index + 1,
+            if task.is_config { "config" } else { "layer" },
             &task.digest[..16],
             crate::common::FormatUtils::format_bytes(task.size),
             task.priority

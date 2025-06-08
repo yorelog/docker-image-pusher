@@ -145,7 +145,12 @@ impl RegistryClient {
         self.auth_operations = self.auth_operations.with_token_manager(token_manager.clone());
         self.blob_operations = self.blob_operations.with_token_manager(token_manager.clone());
         self.manifest_operations = self.manifest_operations.with_token_manager(token_manager.clone());
-        self.repository_operations = self.repository_operations.with_token_manager(token_manager);
+        self.repository_operations = self.repository_operations.with_token_manager(token_manager.clone());
+        
+        // Update OCI client with token manager if available
+        if let Some(ref mut oci_client) = self.oci_client {
+            *oci_client = oci_client.clone().with_token_manager(token_manager);
+        }
         
         self
     }

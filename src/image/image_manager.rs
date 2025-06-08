@@ -6,13 +6,10 @@ use crate::cli::operation_mode::OperationMode;
 use crate::error::{RegistryError, Result};
 use crate::image::cache::Cache;
 use crate::image::manifest::{ManifestType, ParsedManifest, parse_manifest_with_type};
-use crate::image::parser::ImageInfo;
 use crate::image::{BlobHandler, CacheManager, ManifestHandler};
 use crate::logging::Logger;
 use crate::registry::RegistryClient;
-use crate::registry::tar_utils::TarUtils;
 use crate::registry::{PipelineConfig, UnifiedPipeline};
-use std::path::Path;
 
 /// 综合镜像管理器 - 4种操作模式的统一入口
 pub struct ImageManager {
@@ -352,15 +349,7 @@ impl ImageManager {
         })
     }
 
-    fn validate_tar_file(&self, tar_path: &Path) -> Result<()> {
-        if !tar_path.exists() {
-            return Err(RegistryError::Validation(format!(
-                "Tar file '{}' does not exist",
-                tar_path.display()
-            )));
-        }
-        TarUtils::validate_tar_archive(tar_path)
-    }
+
 
     #[allow(dead_code)]
     fn parse_manifest(&self, manifest_data: &[u8]) -> Result<serde_json::Value> {
@@ -507,85 +496,11 @@ impl ImageManager {
             .await
     }
 
-    async fn push_config_from_tar(
-        &self,
-        client: &RegistryClient,
-        tar_path: &Path,
-        config_digest: &str,
-        repository: &str,
-        token: &Option<String>,
-    ) -> Result<()> {
-        let config_data = TarUtils::extract_config_data(tar_path, config_digest)?;
-        let _ = client
-            .upload_blob_with_token(&config_data, config_digest, repository, token)
-            .await?;
-        Ok(())
-    }
 
-    async fn push_layers_from_tar(
-        &self,
-        client: &RegistryClient,
-        tar_path: &Path,
-        layers: &[crate::image::parser::LayerInfo],
-        repository: &str,
-        token: &Option<String>,
-    ) -> Result<()> {
-        self.output
-            .step(&format!("Pushing {} layer blobs", layers.len()));
 
-        for (i, layer) in layers.iter().enumerate() {
-            self.output.detail(&format!(
-                "Layer {}/{}: {}",
-                i + 1,
-                layers.len(),
-                &layer.digest[..16]
-            ));
 
-            // 检查blob是否已存在
-            if client.check_blob_exists(&layer.digest, repository).await? {
-                self.output.detail("Layer already exists, skipping");
-                continue;
-            }
 
-            // 从tar文件提取layer数据并上传
-            let layer_data = TarUtils::extract_layer_data(tar_path, &layer.tar_path)?;
-            let _ = client
-                .upload_blob_with_token(&layer_data, &layer.digest, repository, token)
-                .await?;
-        }
-        Ok(())
-    }
 
-    /// 统一的manifest创建方法
-    fn create_manifest_from_image_info(&self, image_info: &ImageInfo) -> Result<String> {
-        let config = serde_json::json!({
-            "mediaType": "application/vnd.docker.container.image.v1+json",
-            "size": image_info.config_size,
-            "digest": image_info.config_digest
-        });
-
-        let layers: Vec<serde_json::Value> = image_info
-            .layers
-            .iter()
-            .map(|layer| {
-                serde_json::json!({
-                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-                    "size": layer.size,
-                    "digest": layer.digest
-                })
-            })
-            .collect();
-
-        let manifest = serde_json::json!({
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-            "config": config,
-            "layers": layers
-        });
-
-        serde_json::to_string_pretty(&manifest)
-            .map_err(|e| RegistryError::Parse(format!("Failed to serialize manifest: {}", e)))
-    }
 
     // === 公共查询方法 ===
 

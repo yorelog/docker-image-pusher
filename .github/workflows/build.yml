@@ -176,7 +176,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_number) || github.ref_name }}
-        name: ${{ github.event_name == 'workflow_dispatch' && format('Manual Release #{0}', github.run_number) || format('Docker Image Pusher {0}', github.ref_name) }}
+        name: "${{ github.event_name == 'workflow_dispatch' && format('Manual Release #{0}', github.run_number) || format('Docker Image Pusher {0}', github.ref_name) }}"
         files: |
           release-files/docker-image-pusher-linux-x64
           release-files/docker-image-pusher-windows-x64.exe

@@ -263,6 +263,138 @@ impl Cache {
         self.get_blob_path(digest).exists()
     }
 
+    /// Check if a blob exists in cache with enhanced integrity verification
+    pub fn has_blob_with_verification(&self, digest: &str, verify_integrity: bool) -> bool {
+        let blob_path = self.get_blob_path(digest);
+        
+        if !blob_path.exists() {
+            return false;
+        }
+
+        // 获取文件元数据
+        let metadata = match fs::metadata(&blob_path) {
+            Ok(meta) => meta,
+            Err(_) => return false,
+        };
+
+        let file_size = metadata.len();
+
+        // 对于小文件或强制验证，进行完整SHA256验证
+        if verify_integrity || file_size <= 10 * 1024 * 1024 {
+            match self.verify_blob_integrity(&blob_path, digest) {
+                Ok(valid) => valid,
+                Err(_) => false,
+            }
+        } else {
+            // 对于大文件，使用轻量级完整性检查
+            self.verify_large_file_integrity(&blob_path, digest, file_size)
+        }
+    }
+
+    /// Verify blob integrity using full SHA256 calculation
+    fn verify_blob_integrity(&self, blob_path: &Path, expected_digest: &str) -> Result<bool> {
+        let data = fs::read(blob_path)?;
+        let actual_digest = format!(
+            "sha256:{}",
+            crate::image::digest::DigestUtils::compute_sha256(&data)
+        );
+        Ok(actual_digest == expected_digest)
+    }
+
+    /// Verify large file integrity using lightweight checks
+    fn verify_large_file_integrity(&self, blob_path: &Path, _digest: &str, file_size: u64) -> bool {
+        // 基础检查：文件大小是否合理
+        if file_size == 0 {
+            return false;
+        }
+
+        // 检查文件头部是否为有效的gzip格式（大多数Docker层都是gzip压缩的）
+        if let Ok(mut file) = File::open(blob_path) {
+            let mut header = [0u8; 10];
+            if let Ok(n) = file.read(&mut header) {
+                if n >= 2 {
+                    // 检查gzip魔数 (0x1f, 0x8b)
+                    if header[0] == 0x1f && header[1] == 0x8b {
+                        // 对于超大文件，进行抽样验证
+                        if file_size > 100 * 1024 * 1024 {
+                            return self.verify_large_file_sampling(blob_path, file_size);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // 如果不是gzip格式，可能是其他有效格式，进行基础验证
+        self.verify_file_basic_integrity(blob_path, file_size)
+    }
+
+    /// Perform sampling verification for very large files
+    fn verify_large_file_sampling(&self, blob_path: &Path, file_size: u64) -> bool {
+        use std::io::Seek;
+        
+        if let Ok(mut file) = File::open(blob_path) {
+            let sample_size = 4096;
+            let mut buffer = vec![0u8; sample_size];
+
+            // 检查文件开头
+            if file.read(&mut buffer).is_err() {
+                return false;
+            }
+
+            // 检查是否全为零字节（损坏的文件模式）
+            if buffer.iter().all(|&b| b == 0) {
+                return false;
+            }
+
+            // 检查文件中间部分
+            let middle_pos = file_size / 2;
+            if let Ok(_) = file.seek(std::io::SeekFrom::Start(middle_pos)) {
+                if file.read(&mut buffer).is_err() {
+                    return false;
+                }
+                // 同样检查零字节模式
+                if buffer.iter().all(|&b| b == 0) {
+                    return false;
+                }
+            }
+
+            // 检查文件末尾
+            let end_pos = file_size.saturating_sub(sample_size as u64);
+            if let Ok(_) = file.seek(std::io::SeekFrom::Start(end_pos)) {
+                if file.read(&mut buffer).is_err() {
+                    return false;
+                }
+                // 检查零字节模式
+                if buffer.iter().all(|&b| b == 0) {
+                    return false;
+                }
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Basic file integrity verification
+    fn verify_file_basic_integrity(&self, blob_path: &Path, file_size: u64) -> bool {
+        // 基础检查：文件大小合理性
+        if file_size == 0 || file_size > 10 * 1024 * 1024 * 1024 {
+            // 拒绝空文件或超过10GB的文件
+            return false;
+        }
+
+        // 简单的读取测试
+        if let Ok(mut file) = File::open(blob_path) {
+            let mut buffer = [0u8; 1024];
+            // 尝试读取文件开头以确保文件可读
+            file.read(&mut buffer).is_ok()
+        } else {
+            false
+        }
+    }
+
     /// 从缓存中获取 manifest
     pub fn get_manifest(&self, repository: &str, reference: &str) -> Result<Vec<u8>> {
         let cache_key = format!("{}/{}", repository, reference);
@@ -507,6 +639,215 @@ impl Cache {
         });
 
         Ok(serde_json::to_string_pretty(&manifest)?)
+    }
+
+    /// Add a blob to the cache with enhanced integrity verification
+    pub async fn add_blob_with_verification(
+        &mut self,
+        digest: &str,
+        data: &[u8],
+        is_config: bool,
+        _compressed: bool, // 标记为未使用但保留接口兼容性
+        force_verify: bool,
+    ) -> Result<PathBuf> {
+        if !digest.starts_with("sha256:") {
+            return Err(RegistryError::Validation(
+                "Blob digest must start with sha256:".into(),
+            ));
+        }
+
+        let blob_path = self.get_blob_path(digest);
+        
+        // 检查是否已存在 (增强完整性检查)
+        if blob_path.exists() {
+            if let Ok(existing_metadata) = fs::metadata(&blob_path) {
+                if existing_metadata.len() == data.len() as u64 && existing_metadata.len() > 0 {
+                    // 根据文件大小和强制验证标志决定验证策略
+                    let should_verify = force_verify || is_config || data.len() <= 10 * 1024 * 1024;
+                    
+                    if should_verify {
+                        // 小文件或强制验证 - 完整SHA256验证
+                        if let Ok(existing_data) = fs::read(&blob_path) {
+                            let expected_digest_value = digest.trim_start_matches("sha256:");
+                            let existing_digest = crate::image::digest::DigestUtils::compute_sha256(&existing_data);
+                            if existing_digest == expected_digest_value {
+                                return Ok(blob_path);
+                            }
+                        }
+                    } else {
+                        // 大文件 - 使用增强的完整性检查
+                        if self.verify_large_file_integrity(&blob_path, digest, existing_metadata.len()) {
+                            return Ok(blob_path);
+                        }
+                    }
+                }
+            }
+            // 如果验证失败，删除损坏的文件
+            let _ = fs::remove_file(&blob_path);
+        }
+
+        // 对于新blob，进行适当的完整性验证
+        if force_verify || is_config || data.len() <= 10 * 1024 * 1024 {
+            // 小文件或强制验证 - 完整SHA256验证
+            let actual_digest = format!(
+                "sha256:{}",
+                crate::image::digest::DigestUtils::compute_sha256(data)
+            );
+            if actual_digest != digest {
+                return Err(RegistryError::Validation(format!(
+                    "Blob digest mismatch. Expected: {}, Got: {}",
+                    digest, actual_digest
+                )));
+            }
+        } else {
+            // 大文件 - 基础验证 (检查数据完整性但不计算SHA256)
+            if data.is_empty() {
+                return Err(RegistryError::Validation(
+                    "Cannot cache empty blob data".to_string(),
+                ));
+            }
+        }
+
+        // Ensure parent directories exist
+        if let Some(parent) = blob_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // 使用临时文件确保原子写入
+        let temp_path = blob_path.with_extension("tmp");
+        let mut file = File::create(&temp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+
+        // 原子性地重命名临时文件
+        fs::rename(&temp_path, &blob_path)?;
+
+        Ok(blob_path)
+    }
+
+    /// 流式保存blob到缓存，支持边下载边验证
+    pub async fn add_blob_stream_with_verification<R>(
+        &mut self,
+        digest: &str,
+        mut reader: R,
+        expected_size: Option<u64>,
+        _is_config: bool, // 保留接口兼容性但标记为未使用
+        verify_integrity: bool,
+    ) -> Result<PathBuf>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        use sha2::{Sha256, Digest};
+        
+        if !digest.starts_with("sha256:") {
+            return Err(RegistryError::Validation(
+                "Blob digest must start with sha256:".into(),
+            ));
+        }
+
+        let blob_path = self.get_blob_path(digest);
+        
+        // 检查是否已存在
+        if blob_path.exists() {
+            if let Ok(metadata) = fs::metadata(&blob_path) {
+                if let Some(expected) = expected_size {
+                    if metadata.len() == expected && metadata.len() > 0 {
+                        // 使用增强的完整性检查
+                        if self.has_blob_with_verification(digest, verify_integrity) {
+                            return Ok(blob_path);
+                        }
+                    }
+                }
+            }
+            // 如果检查失败，删除现有文件
+            let _ = fs::remove_file(&blob_path);
+        }
+
+        // Ensure parent directories exist
+        if let Some(parent) = blob_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // 使用临时文件进行流式写入
+        let temp_path = blob_path.with_extension("tmp");
+        let mut temp_file = tokio::fs::File::create(&temp_path).await
+            .map_err(|e| RegistryError::Io(format!("Failed to create temp file: {}", e)))?;
+
+        let mut total_written = 0u64;
+        let mut hasher: Option<Sha256> = if verify_integrity {
+            Some(Sha256::new())
+        } else {
+            None
+        };
+
+        // 流式读取和写入
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut chunk).await
+                .map_err(|e| RegistryError::Io(format!("Failed to read stream: {}", e)))?;
+            
+            if n == 0 {
+                break;
+            }
+
+            let chunk_data = &chunk[..n];
+            
+            // 写入临时文件
+            tokio::io::AsyncWriteExt::write_all(&mut temp_file, chunk_data).await
+                .map_err(|e| RegistryError::Io(format!("Failed to write to temp file: {}", e)))?;
+            
+            // 更新哈希计算 (如果需要验证)
+            if let Some(ref mut h) = hasher {
+                h.update(chunk_data);
+            }
+            
+            total_written += n as u64;
+            
+            // 检查文件大小是否超出预期
+            if let Some(expected) = expected_size {
+                if total_written > expected {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(RegistryError::Validation(format!(
+                        "Blob size exceeded expected: {} > {}",
+                        total_written, expected
+                    )));
+                }
+            }
+        }
+
+        // 确保数据写入磁盘
+        temp_file.sync_all().await
+            .map_err(|e| RegistryError::Io(format!("Failed to sync temp file: {}", e)))?;
+
+        // 验证文件大小
+        if let Some(expected) = expected_size {
+            if total_written != expected {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(RegistryError::Validation(format!(
+                    "Blob size mismatch: expected {}, got {}",
+                    expected, total_written
+                )));
+            }
+        }
+
+        // 验证SHA256 (如果需要)
+        if let Some(h) = hasher {
+            let computed_digest = format!("sha256:{}", hex::encode(h.finalize()));
+            if computed_digest != digest {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(RegistryError::Validation(format!(
+                    "Stream digest mismatch. Expected: {}, Got: {}",
+                    digest, computed_digest
+                )));
+            }
+        }
+
+        // 原子性地重命名临时文件
+        tokio::fs::rename(&temp_path, &blob_path).await
+            .map_err(|e| RegistryError::Io(format!("Failed to rename temp file: {}", e)))?;
+
+        Ok(blob_path)
     }
 }
 

@@ -1,13 +1,39 @@
-# Docker 镜像推送工具 v0.2.0
+# Docker 镜像推送工具 v0.3.0
 
 [![构建状态](https://github.com/yorelog/docker-image-pusher/workflows/Build%20and%20Test/badge.svg)](https://github.com/yorelog/docker-image-pusher/actions)
 [![Crates.io](https://img.shields.io/crates/v/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 [![许可证: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![下载量](https://img.shields.io/crates/d/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 
-用 Rust 编写的**高性能命令行工具**，能够将 Docker 镜像 tar 包直接推送到 Docker 镜像仓库。**版本 0.2.2** 代表了一次重大的架构重构，具有现代化的命名约定、简化的模块结构和改进的错误处理。
+用 Rust 编写的**高性能命令行工具**，能够将 Docker 镜像 tar 包直接推送到 Docker 镜像仓库。**版本 0.3.0** 引入了革命性的统一管道进度显示，具有先进的性能监控、智能并发管理和实时网络回归分析。
 
 ## [🇺🇸 English Documentation](README.md)
+
+## 🌟 v0.3.0 新特性 - 统一管道进度显示
+
+### 🚀 **革命性进度监控**
+- **统一管道显示**：实时进度跟踪与综合性能指标
+- **网络速度回归**：基于线性回归的高级统计分析用于性能预测
+- **智能并发管理**：基于网络条件和性能趋势的动态调整
+- **增强进度可视化**：带网络性能指示器的彩色进度条
+
+### 📊 **高级性能分析**
+- **速度趋势分析**：带置信度指标的实时网络性能监控
+- **基于回归的预测**：用于ETA计算和最优并发建议的统计分析
+- **优先级队列管理**：基于大小优先级的智能任务调度
+- **资源利用率跟踪**：系统和网络资源的综合监控
+
+### 🎯 **智能并发特性**
+- **自适应并发**：基于网络性能分析的自动调整
+- **性能监控器**：传输速度、吞吐量和效率的详细跟踪
+- **优先级统计**：高/中/低优先级任务分配的高级队列
+- **瓶颈分析**：性能约束的智能识别
+
+### 🔧 **增强用户体验**
+- **实时进度更新**：带网络速度指示器和趋势分析的实时显示
+- **详细性能报告**：综合统计数据和效率指标
+- **置信度指标**：预测和建议的统计置信度级别
+- **详细分析模式**：性能优化的深度分析
 
 ## ✨ v0.2.0 新特性 - 架构改进
 
@@ -142,9 +168,86 @@ docker-image-pusher \
 | `--skip-existing` | 跳过已存在的层 | 断点续传 |
 | `--force-upload` | 强制上传即使层已存在 | 覆盖现有层 |
 
-### 高级示例
+## 🎯 v0.3.0 性能特性
 
-#### 大镜像优化
+### **统一管道进度显示**
+体验革命性的实时进度监控与智能分析：
+
+```bash
+# 查看高级进度显示的实际效果
+docker-image-pusher \
+  -r https://registry.company.com/app:v1.0 \
+  -f large-image.tar \
+  -u admin \
+  -p password \
+  --max-concurrent 4 \
+  --verbose  # 显示带性能分析的详细进度
+```
+
+**实时显示特性：**
+- 🟩🟨🟥 **基于网络性能的彩色进度条**
+- 📈📉📊 **带回归分析的速度趋势指示器**  
+- ⚡ **实时显示的动态并发调整**
+- 🎯 **带统计置信度的ETA预测**
+- 🔧 **瓶颈分析与优化建议**
+
+### **高级性能分析**
+```bash
+# 监控带回归分析的性能
+docker-image-pusher \
+  -r https://ml-registry.com/model:v2.0 \
+  -f 15gb-model.tar \
+  -u scientist \
+  -p token \
+  --max-concurrent 6 \
+  --verbose \
+  --large-layer-threshold 2147483648
+
+# 输出显示：
+# 🚀 [🟩🟩🟩🟩🟩░░░░░] 45.2% | T:23/51 A:6 | ⚡6/6 | 📈67.3MB/s | S:SF | 🔧AUTO | ETA:4m32s(87%)
+# 
+# 📊 管道进度：
+#    • 总任务：51 | 已完成：23 (45.1%)
+#    • 管道速度：67.30 MB/s | 效率：95.2%
+# 
+# 🔧 高级并发管理：
+#    • 当前/最大并行：6/6 (利用率：100.0%)
+#    • 优先级队列分布：
+#      - 高：8 (57.1%) | 中：4 (28.6%) | 低：2 (14.3%)
+# 
+# 🌐 网络性能与回归分析：
+#    • 当前速度：67.30 MB/s | 平均：62.15 MB/s
+#    • 速度趋势：📈 逐渐增加 (0.125/sec) | 回归置信度：高
+#    • 速度方差：8.3% 🟢 稳定
+```
+
+### **智能并发管理**
+```bash
+# 让工具自动优化并发数
+docker-image-pusher \
+  -r https://harbor.prod.com/services/api:v3.1 \
+  -f production-image.tar \
+  -u deployer \
+  -p $DEPLOY_TOKEN \
+  --max-concurrent 8 \  # 起始点，将自动调整
+  --verbose
+
+# 工具将：
+# ✅ 从8个并发上传开始
+# 📊 监控网络性能趋势
+# 🔧 自动调整到最优并发数（例如，6个以获得最佳速度）
+# 📈 显示调整原因："网络性能下降 - 建议减少并发"
+# 🎯 提供基于置信度的ETA更新
+```
+
+### **性能回归特性**
+- **统计分析**：传输速度的线性回归用于趋势预测
+- **置信度级别**：基于R平方的性能预测置信度
+- **自适应建议**：基于回归分析的并发调整
+- **瓶颈检测**：网络与系统约束的智能识别
+- **性能评分**：带优化建议的整体效率指标
+
+## 🏎️ 高级示例
 ```bash
 # 针对大型ML模型优化 (15GB PyTorch模型)
 docker-image-pusher \

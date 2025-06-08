@@ -6,6 +6,7 @@ use crate::error::{RegistryError, Result};
 use crate::image::manifest::{ManifestType, parse_manifest};
 use crate::logging::Logger;
 use crate::registry::auth::Auth;
+use crate::registry::token_manager::TokenManager;
 use reqwest::Client;
 use std::io::Read;
 use std::time::Duration;
@@ -13,9 +14,10 @@ use std::time::Duration;
 #[derive(Clone)] // Add Clone derive
 pub struct RegistryClient {
     client: Client,
-    auth: Auth,
+    pub auth: Auth,
     address: String,
     output: Logger,
+    token_manager: Option<TokenManager>,
 }
 
 #[derive(Debug)]
@@ -95,6 +97,7 @@ impl RegistryClientBuilder {
             auth,
             address: self.address,
             output,
+            token_manager: None,
         })
     }
 }
@@ -278,15 +281,12 @@ impl RegistryClient {
             return Ok(digest.to_string());
         }
 
-        // 启动上传会话
-        let upload_url = self
-            .start_upload_session_with_token(repository, token)
-            .await?;
+        // 使用单阶段上传（Monolithic Upload）- 更兼容各种registry
+        let url = format!("{}/v2/{}/blobs/uploads/?digest={}", self.address, repository, digest);
 
-        // 上传数据
         let mut request = self
             .client
-            .put(&format!("{}?digest={}", upload_url, digest))
+            .post(&url)
             .header("Content-Type", "application/octet-stream")
             .header("Content-Length", data.len().to_string())
             .body(data.to_vec());
@@ -475,6 +475,79 @@ impl RegistryClient {
             self.address, repository, normalized_digest
         );
 
+        // Use token manager for automatic refresh if available
+        if let Some(ref token_manager) = self.token_manager {
+            let repository_clone = repository.to_string();
+            let url_clone = url.clone();
+            let normalized_digest_clone = normalized_digest.clone();
+            let output_clone = self.output.clone();
+            let client_clone = self.client.clone();
+
+            return token_manager.execute_with_retry(|token| {
+                let url = url_clone.clone();
+                let normalized_digest = normalized_digest_clone.clone();
+                let output = output_clone.clone();
+                let client = client_clone.clone();
+                let repository = repository_clone.clone();
+
+                Box::pin(async move {
+                    let mut request = client.get(&url);
+
+                    // 添加授权头（如果提供了 token）
+                    if let Some(token) = token {
+                        request = request.bearer_auth(token);
+                    }
+
+                    let response = request.send().await.map_err(|e| {
+                        output.error(&format!("Failed to pull blob: {}", e));
+                        NetworkErrorHandler::handle_network_error(&e, "blob pull")
+                    })?;
+
+                    if response.status().is_success() {
+                        let content_length = response.content_length().unwrap_or(0);
+
+                        output.success(&format!(
+                            "Successfully pulled blob {} ({}) from {}",
+                            &normalized_digest[..16],
+                            output.format_size(content_length),
+                            repository
+                        ));
+
+                        let data = response.bytes().await.map_err(|e| {
+                            RegistryError::Network(format!("Failed to read blob response: {}", e))
+                        })?;
+
+                        Ok(data.to_vec())
+                    } else {
+                        let status = response.status();
+                        let error_text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Failed to read error response".to_string());
+
+                        // For 401 errors, return a specific error that the token manager can catch
+                        if status == reqwest::StatusCode::UNAUTHORIZED {
+                            return Err(RegistryError::Registry(format!(
+                                "401 Unauthorized: Failed to pull blob {} from {} - token may have expired",
+                                normalized_digest, repository
+                            )));
+                        }
+
+                        output.error(&format!(
+                            "Failed to pull blob: HTTP {} - {}",
+                            status, error_text
+                        ));
+
+                        Err(RegistryError::Registry(format!(
+                            "Failed to pull blob {} from {} (status {}): {}",
+                            normalized_digest, repository, status, error_text
+                        )))
+                    }
+                })
+            }).await;
+        }
+
+        // Fallback to direct request without token manager
         let mut request = self.client.get(&url);
 
         // 添加授权头（如果提供了 token）
@@ -497,6 +570,67 @@ impl RegistryClient {
                 repository
             ));
 
+            let data = response.bytes().await.map_err(|e| {
+                RegistryError::Network(format!("Failed to read blob response: {}", e))
+            })?;
+
+            Ok(data.to_vec())
+        } else {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error response".to_string());
+
+            self.output.error(&format!(
+                "Failed to pull blob: HTTP {} - {}",
+                status, error_text
+            ));
+
+            Err(RegistryError::Registry(format!(
+                "Failed to pull blob {} from {} (status {}): {}",
+                normalized_digest, repository, status, error_text
+            )))
+        }
+    }
+
+    /// Pull blob silently without printing individual success messages (for enhanced progress display)
+    pub async fn pull_blob_silent(
+        &self,
+        repository: &str,
+        digest: &str,
+        token: &Option<String>,
+    ) -> Result<Vec<u8>> {
+        // 确保摘要格式正确
+        let normalized_digest = if digest.starts_with("sha256:") {
+            digest.to_string()
+        } else {
+            format!("sha256:{}", digest)
+        };
+
+        self.output.verbose(&format!(
+            "Pulling blob {} from {}",
+            &normalized_digest[..16], repository
+        ));
+
+        let url = format!(
+            "{}/v2/{}/blobs/{}",
+            self.address, repository, normalized_digest
+        );
+
+        let mut request = self.client.get(&url);
+
+        // 如果有认证token，添加到请求头
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request.send().await.map_err(|e| {
+            self.output.error(&format!("Failed to pull blob: {}", e));
+            NetworkErrorHandler::handle_network_error(&e, "blob pull")
+        })?;
+
+        if response.status().is_success() {
             let data = response.bytes().await.map_err(|e| {
                 RegistryError::Network(format!("Failed to read blob response: {}", e))
             })?;
@@ -706,6 +840,7 @@ impl RegistryClient {
     }
 
     /// 启动上传会话（内部方法）
+    #[allow(dead_code)]
     async fn start_upload_session_with_token(
         &self,
         repository: &str,
@@ -756,5 +891,13 @@ impl RegistryClient {
     async fn upload_blob(&self, data: &[u8], digest: &str, repository: &str) -> Result<String> {
         self.upload_blob_with_token(data, digest, repository, &None)
             .await
+    }
+
+    /// Enable automatic token refresh for long-running operations
+    pub fn with_token_manager(mut self, token_info: Option<crate::registry::auth::TokenInfo>) -> Self {
+        if let Some(info) = token_info {
+            self.token_manager = Some(TokenManager::new(self.auth.clone(), self.output.clone()).with_token_info(Some(info)));
+        }
+        self
     }
 }

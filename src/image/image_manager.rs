@@ -6,7 +6,8 @@ use crate::cli::operation_mode::OperationMode;
 use crate::error::{RegistryError, Result};
 use crate::image::cache::Cache;
 use crate::image::manifest::{ManifestType, ParsedManifest, parse_manifest_with_type};
-use crate::image::parser::{ImageInfo, LayerInfo};
+use crate::image::parser::ImageInfo;
+use crate::image::{BlobHandler, CacheManager, ManifestHandler, TarHandler};
 use crate::logging::Logger;
 use crate::registry::RegistryClient;
 use crate::registry::tar_utils::TarUtils;
@@ -19,20 +20,38 @@ pub struct ImageManager {
     output: Logger,
     pipeline_config: PipelineConfig,
     use_optimized_upload: bool,
+    concurrency_config: Option<crate::concurrency::ConcurrencyConfig>,
+    // Specialized handlers for modular operations
+    manifest_handler: ManifestHandler,
+    blob_handler: BlobHandler,
+    tar_handler: TarHandler,
+    cache_manager: CacheManager,
 }
 
 impl ImageManager {
     /// 创建新的镜像管理器
     pub fn new(cache_dir: Option<&str>, verbose: bool) -> Result<Self> {
         let cache = Cache::new(cache_dir)?;
+        let cache2 = Cache::new(cache_dir)?; // Create a second cache instance for the manager
         let output = Logger::new(verbose);
         let pipeline_config = PipelineConfig::default();
+
+        // Initialize specialized handlers with correct constructors
+        let manifest_handler = ManifestHandler::new(output.clone(), pipeline_config.clone());
+        let blob_handler = BlobHandler::new(output.clone());
+        let tar_handler = TarHandler::new(output.clone(), pipeline_config.clone(), true);
+        let cache_manager = CacheManager::new(cache2, output.clone());
 
         Ok(Self {
             cache,
             output,
             pipeline_config,
             use_optimized_upload: true, // Default to optimized mode
+            concurrency_config: None,
+            manifest_handler,
+            blob_handler,
+            tar_handler,
+            cache_manager,
         })
     }
 
@@ -43,14 +62,26 @@ impl ImageManager {
         use_optimized_upload: bool,
     ) -> Result<Self> {
         let cache = Cache::new(cache_dir)?;
+        let cache2 = Cache::new(cache_dir)?; // Create a second cache instance for the manager
         let output = Logger::new(verbose);
         let pipeline_config = PipelineConfig::default();
+
+        // Initialize specialized handlers with correct constructors
+        let manifest_handler = ManifestHandler::new(output.clone(), pipeline_config.clone());
+        let blob_handler = BlobHandler::new(output.clone());
+        let tar_handler = TarHandler::new(output.clone(), pipeline_config.clone(), use_optimized_upload);
+        let cache_manager = CacheManager::new(cache2, output.clone());
 
         Ok(Self {
             cache,
             output,
             pipeline_config,
             use_optimized_upload,
+            concurrency_config: None,
+            manifest_handler,
+            blob_handler,
+            tar_handler,
+            cache_manager,
         })
     }
 
@@ -70,7 +101,7 @@ impl ImageManager {
                 repository,
                 reference,
             } => {
-                self.mode_1_pull_and_cache(client, repository, reference, auth_token)
+                self.pull_and_cache_image(client, repository, reference, auth_token)
                     .await
             }
             OperationMode::ExtractAndCache {
@@ -78,7 +109,7 @@ impl ImageManager {
                 repository,
                 reference,
             } => {
-                self.mode_2_extract_and_cache(tar_file, repository, reference)
+                self.extract_and_cache_from_tar(tar_file, repository, reference)
                     .await
             }
             OperationMode::PushFromCacheUsingManifest {
@@ -90,7 +121,7 @@ impl ImageManager {
                 reference,
             } => {
                 // 模式3和4使用相同的逻辑，因为缓存格式统一
-                self.mode_3_4_push_from_cache(client, repository, reference, auth_token)
+                self.push_from_cache(client, repository, reference, auth_token)
                     .await
             }
             OperationMode::PushFromTar {
@@ -99,22 +130,42 @@ impl ImageManager {
                 reference,
             } => {
                 if self.use_optimized_upload {
-                    self.mode_5_push_from_tar_optimized(
+                    self.push_from_tar_optimized(
                         client, tar_file, repository, reference, auth_token,
                     )
                     .await
                 } else {
-                    self.mode_5_push_from_tar(client, tar_file, repository, reference, auth_token)
+                    self.push_from_tar(client, tar_file, repository, reference, auth_token)
                         .await
                 }
             }
         }
     }
 
+    /// 执行推送操作（支持源和目标坐标分离）
+    pub async fn execute_push_from_cache_with_source(
+        &mut self,
+        source_repository: &str,
+        source_reference: &str,
+        target_repository: &str,
+        target_reference: &str,
+        client: Option<&RegistryClient>,
+        auth_token: Option<&str>,
+    ) -> Result<()> {
+        self.push_from_cache_with_source(
+            client, 
+            source_repository, 
+            source_reference, 
+            target_repository, 
+            target_reference, 
+            auth_token
+        ).await
+    }
+
     // === 4种核心操作模式实现 ===
 
-    /// 模式1: 从repository拉取并缓存
-    async fn mode_1_pull_and_cache(
+    /// Pull image from registry and cache locally
+    async fn pull_and_cache_image(
         &mut self,
         client: Option<&RegistryClient>,
         repository: &str,
@@ -156,72 +207,73 @@ impl ImageManager {
         }
 
         self.output
-            .success(&format!("Successfully cached {}/{}", repository, reference));
+            .success(&format!("Successfully cached {}:{}", repository, reference));
         Ok(())
     }
 
-    /// 模式2: 从tar文件提取并缓存
-    async fn mode_2_extract_and_cache(
+    /// Extract from tar file and cache locally
+    async fn extract_and_cache_from_tar(
         &mut self,
         tar_file: &str,
         repository: &str,
         reference: &str,
     ) -> Result<()> {
-        let tar_path = Path::new(tar_file);
-        self.validate_tar_file(tar_path)?;
-
-        self.output.info(&format!(
-            "Extracting {} to cache as {}/{}",
+        // Delegate to cache manager
+        self.cache_manager.extract_and_cache_from_tar(
             tar_file, repository, reference
-        ));
-
-        // 使用统一的tar解析和缓存逻辑
-        self.cache.cache_from_tar(tar_path, repository, reference)?;
-
-        self.output.success(&format!(
-            "Successfully extracted and cached {}/{}",
-            repository, reference
-        ));
-        Ok(())
+        ).await
     }
 
-    /// 模式3和4: 统一的从缓存推送方法
-    async fn mode_3_4_push_from_cache(
+    /// Push from cache to registry
+    async fn push_from_cache(
         &mut self,
         client: Option<&RegistryClient>,
         repository: &str,
         reference: &str,
         token: Option<&str>,
     ) -> Result<()> {
+        self.push_from_cache_with_source(client, repository, reference, repository, reference, token).await
+    }
+
+    /// Push from cache to registry with separate source and target coordinates
+    async fn push_from_cache_with_source(
+        &mut self,
+        client: Option<&RegistryClient>,
+        source_repository: &str,
+        source_reference: &str,
+        target_repository: &str,
+        target_reference: &str,
+        token: Option<&str>,
+    ) -> Result<()> {
         let client = self.require_client(client)?;
         let token = token.map(|s| s.to_string());
 
         self.output.info(&format!(
-            "Pushing {}/{} from cache to registry",
-            repository, reference
+            "Pushing {}/{} from cache to registry as {}/{}",
+            source_repository, source_reference, target_repository, target_reference
         ));
 
-        // 验证缓存完整性
-        self.validate_cache_completeness(repository, reference)?;
+        // 验证缓存完整性 - 使用源镜像坐标
+        self.validate_cache_completeness(source_repository, source_reference)?;
 
-        // 推送所有blobs
-        let blobs = self.cache.get_image_blobs(repository, reference)?;
-        self.push_blobs_to_registry(client, repository, &blobs, &token)
+        // 推送所有blobs - 使用源镜像坐标获取blobs
+        let blobs = self.cache.get_image_blobs(source_repository, source_reference)?;
+        self.push_blobs_to_registry(client, target_repository, &blobs, &token)
             .await?;
 
-        // 推送manifest
-        self.push_manifest_to_registry(client, repository, reference, &token)
+        // 推送manifest - 使用源镜像坐标获取manifest，但推送到目标坐标
+        self.push_manifest_to_registry_with_source(client, source_repository, source_reference, target_repository, target_reference, &token)
             .await?;
 
         self.output.success(&format!(
-            "Successfully pushed {}/{} from cache",
-            repository, reference
+            "Successfully pushed {}/{} from cache to {}/{}",
+            source_repository, source_reference, target_repository, target_reference
         ));
         Ok(())
     }
 
-    /// 模式5: 优化的直接从tar文件推送（使用统一管道）
-    async fn mode_5_push_from_tar_optimized(
+    /// Push from tar file using optimized unified pipeline
+    async fn push_from_tar_optimized(
         &mut self,
         client: Option<&RegistryClient>,
         tar_file: &str,
@@ -231,59 +283,15 @@ impl ImageManager {
     ) -> Result<()> {
         let client = self.require_client(client)?;
         let token = token.map(|s| s.to_string());
-        let tar_path = Path::new(tar_file);
 
-        self.validate_tar_file(tar_path)?;
-        self.output.info(&format!(
-            "Pushing {}/{} from tar file (unified pipeline)",
-            repository, reference
-        ));
-
-        // Parse tar file to get layer information
-        let image_info = TarUtils::parse_image_info(tar_path)?;
-
-        self.output.detail(&format!(
-            "Found {} layers, total size: {}",
-            image_info.layers.len(),
-            self.output.format_size(image_info.total_size)
-        ));
-
-        // Create unified pipeline with configuration
-        let pipeline =
-            UnifiedPipeline::new(self.output.clone()).with_config(self.pipeline_config.clone());
-
-        // Upload config blob first (not included in layers)
-        let config_data = TarUtils::extract_config_data(tar_path, &image_info.config_digest)?;
-        client
-            .upload_blob_with_token(&config_data, &image_info.config_digest, repository, &token)
-            .await?;
-
-        // Process layer uploads using unified pipeline
-        pipeline
-            .process_uploads(
-                &image_info.layers,
-                repository,
-                tar_path,
-                &token,
-                std::sync::Arc::new(client.clone()),
-            )
-            .await?;
-
-        // Create and push manifest
-        let manifest_json = self.create_manifest_from_image_info(&image_info)?;
-        client
-            .upload_manifest_with_token(&manifest_json, repository, reference, &token)
-            .await?;
-
-        self.output.success(&format!(
-            "Successfully pushed {}/{} from tar file (unified pipeline)",
-            repository, reference
-        ));
-        Ok(())
+        // Delegate to tar handler
+        self.tar_handler.push_from_tar_optimized(
+            client, tar_file, repository, reference, &token
+        ).await
     }
 
-    /// 模式5: 直接从tar文件推送（无需缓存）
-    async fn mode_5_push_from_tar(
+    /// Push directly from tar file (without caching)
+    async fn push_from_tar(
         &mut self,
         client: Option<&RegistryClient>,
         tar_file: &str,
@@ -379,15 +387,28 @@ impl ImageManager {
         token: &Option<String>,
         is_config: bool,
     ) -> Result<()> {
-        if self.cache.has_blob(digest) {
+        // 使用增强的缓存检查，避免大文件的昂贵SHA256验证
+        let verify_integrity = is_config || self.cache.get_blob_size(digest).map_or(true, |size| size <= 10 * 1024 * 1024);
+        
+        if self.cache.has_blob_with_verification(digest, verify_integrity) {
             self.output
-                .detail(&format!("Blob {} already in cache", &digest[..16]));
+                .detail(&format!("Blob {} already in cache (verified)", &digest[..16]));
             return Ok(());
         }
 
+        self.output
+            .detail(&format!("Downloading blob {}", &digest[..16]));
+
         let blob_data = client.pull_blob(repository, digest, token).await?;
+        
+        // 使用增强的blob缓存方法，支持智能验证策略
         self.cache
-            .save_blob(digest, &blob_data, is_config, !is_config)?;
+            .add_blob_with_verification(digest, &blob_data, is_config, !is_config, false)
+            .await?;
+            
+        self.output
+            .detail(&format!("Cached blob {} ({} bytes) with verification", &digest[..16], blob_data.len()));
+            
         Ok(())
     }
 
@@ -461,29 +482,29 @@ impl ImageManager {
         blobs: &[crate::image::cache::BlobInfo],
         token: &Option<String>,
     ) -> Result<()> {
-        self.output.step(&format!("Pushing {} blobs", blobs.len()));
-
-        for blob in blobs {
-            let blob_data = self.cache.get_blob(&blob.digest)?;
-            let _ = client
-                .upload_blob_with_token(&blob_data, &blob.digest, repository, token)
-                .await?;
-        }
-        Ok(())
+        // Delegate to blob handler
+        self.blob_handler.push_blobs_to_registry(
+            client, repository, blobs, token, &self.cache
+        ).await
     }
 
-    async fn push_manifest_to_registry(
+
+    async fn push_manifest_to_registry_with_source(
         &self,
         client: &RegistryClient,
-        repository: &str,
-        reference: &str,
+        source_repository: &str,
+        source_reference: &str,
+        target_repository: &str,
+        target_reference: &str,
         token: &Option<String>,
     ) -> Result<()> {
         self.output.step("Pushing manifest");
-        let manifest_data = self.cache.get_manifest(repository, reference)?;
+        // Get manifest from source coordinates in cache
+        let manifest_data = self.cache.get_manifest(source_repository, source_reference)?;
         let manifest_str = String::from_utf8(manifest_data)?;
+        // Push manifest to target coordinates in registry
         client
-            .upload_manifest_with_token(&manifest_str, repository, reference, token)
+            .upload_manifest_with_token(&manifest_str, target_repository, target_reference, token)
             .await
     }
 
@@ -599,6 +620,64 @@ impl ImageManager {
         (self.use_optimized_upload, &self.pipeline_config)
     }
 
+    /// Configure concurrency management through the new concurrency module
+    /// 
+    /// This method integrates with the unified concurrency management system,
+    /// replacing the old pipeline-specific concurrency configuration.
+    pub fn configure_concurrency(&mut self, config: crate::concurrency::ConcurrencyConfig) {
+        // Store the concurrency config for use with the concurrency manager
+        // The actual concurrency control is now handled by the dedicated concurrency module
+        // which provides advanced features like dynamic adjustment, performance monitoring,
+        // and intelligent strategy selection.
+        self.concurrency_config = Some(config);
+        
+        self.output.detail("Concurrency management configured using unified concurrency module");
+    }
+
+    /// Create appropriate concurrency manager based on configuration
+    /// 
+    /// Returns a concurrency manager instance based on the configured strategy.
+    /// This provides a factory method for creating the right type of concurrency
+    /// manager for the current configuration.
+    pub fn create_concurrency_manager(&self) -> Result<Box<dyn crate::concurrency::ConcurrencyController>> {
+        let config = self.concurrency_config.as_ref()
+            .ok_or_else(|| crate::error::RegistryError::Validation(
+                "No concurrency configuration available. Call configure_concurrency() first.".to_string()
+            ))?;
+
+        // Always use adaptive concurrency manager
+        self.output.detail("Creating adaptive concurrency manager");
+        Ok(Box::new(crate::concurrency::AdaptiveConcurrencyManager::new(config.clone())))
+    }
+
+    /// Get configured concurrency limits for pipeline operations
+    /// 
+    /// Returns the concurrency limits from the stored configuration,
+    /// providing backward compatibility for pipeline operations that
+    /// need basic concurrency information.
+    pub fn get_concurrency_limits(&self) -> (usize, usize, usize) {
+        if let Some(config) = &self.concurrency_config {
+            (
+                config.limits.max_concurrent,
+                config.limits.small_file_concurrent,
+                config.limits.large_file_concurrent,
+            )
+        } else {
+            // Default values for backward compatibility
+            (8, 12, 4)
+        }
+    }
+
+    /// Configure simple concurrency (convenience method)
+    /// 
+    /// This is a convenience method for simple use cases that only need
+    /// to set maximum concurrency without advanced features.
+    pub fn configure_simple_concurrency(&mut self, max_concurrent: usize) {
+        let config = crate::concurrency::ConcurrencyConfig::default()
+            .with_max_concurrent(max_concurrent);
+        self.configure_concurrency(config);
+    }
+
     /// Handle OCI index or Docker manifest list
     async fn handle_index_manifest(
         &mut self,
@@ -608,58 +687,10 @@ impl ImageManager {
         parsed_manifest: &ParsedManifest,
         token: &Option<String>,
     ) -> Result<()> {
-        self.output.info("Processing multi-platform manifest index");
-
-        let platform_manifests = parsed_manifest.platform_manifests.as_ref().ok_or_else(|| {
-            RegistryError::Parse("Missing platform manifests in index".to_string())
-        })?;
-
-        // For now, pick the first linux/amd64 manifest, or just the first one if no linux/amd64 found
-        let target_manifest = platform_manifests
-            .iter()
-            .find(|m| {
-                if let Some(platform) = &m.platform {
-                    platform.os == "linux" && platform.architecture == "amd64"
-                } else {
-                    false
-                }
-            })
-            .or_else(|| platform_manifests.first())
-            .ok_or_else(|| {
-                RegistryError::Parse("No suitable manifest found in index".to_string())
-            })?;
-
-        self.output.detail(&format!(
-            "Selected manifest: {} ({})",
-            &target_manifest.digest[..16],
-            target_manifest
-                .platform
-                .as_ref()
-                .map(|p| format!("{}/{}", p.os, p.architecture))
-                .unwrap_or_else(|| "unknown platform".to_string())
-        ));
-
-        // Pull the specific platform manifest using digest as reference
-        let platform_manifest_data = client
-            .pull_manifest(repository, &target_manifest.digest, token)
-            .await?;
-        let platform_parsed = parse_manifest_with_type(&platform_manifest_data)?;
-
-        // Save the original index manifest
-        if let Some(config_digest) = &platform_parsed.config_digest {
-            self.cache.save_manifest(
-                repository,
-                reference,
-                &parsed_manifest.raw_data,
-                config_digest,
-            )?;
-        }
-
-        // Process the platform-specific manifest
-        self.handle_single_manifest(client, repository, reference, &platform_parsed, token)
-            .await?;
-
-        Ok(())
+        // Delegate to manifest handler
+        self.manifest_handler.handle_index_manifest(
+            client, repository, reference, parsed_manifest, token, &mut self.cache
+        ).await
     }
 
     /// Handle single-platform manifest (Docker V2 or OCI) - now using unified pipeline
@@ -695,12 +726,12 @@ impl ImageManager {
             .await?;
 
         // Convert layer digests to LayerInfo for unified pipeline
-        let layers: Vec<LayerInfo> = parsed_manifest
+        let layers: Vec<crate::image::parser::LayerInfo> = parsed_manifest
             .layer_digests
             .iter()
             .enumerate()
             .map(|(index, digest)| {
-                LayerInfo {
+                crate::image::parser::LayerInfo {
                     digest: digest.clone(),
                     size: 0, // Size will be determined during download or estimated
                     tar_path: format!("layer_{}.tar", index), // Placeholder
@@ -735,6 +766,11 @@ impl ImageManager {
         }
 
         Ok(())
+    }
+
+    /// 获取Logger引用
+    pub fn get_logger(&self) -> &Logger {
+        &self.output
     }
 }
 

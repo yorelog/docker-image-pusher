@@ -24,12 +24,9 @@ pub mod token_manager;
 pub use auth::{Auth, TokenInfo};
 pub use client::{RegistryClient, RegistryClientBuilder};
 pub use pipeline::{
-    EnhancedProgressTracker, TaskOperation, PipelineConfig, 
-    EnhancedConcurrencyStats, PriorityQueueStatus, NetworkSpeedStats,
-    ConcurrencyAdjustmentRecord, PerformancePrediction, PipelineStats,
-    TaskMetadata, ProgressDisplayUtils, UnifiedPipeline, UploadConfig,
+    EnhancedProgressTracker, TaskOperation, PipelineConfig, UnifiedPipeline, 
     Uploader, RegistryCoordinator
 };
-pub use stats::{UploadStats, LayerUploadStats, LayerStatus, ProgressReporter, SessionStats};
+pub use stats::{UploadStats, LayerUploadStats, SessionStats};
 pub use tar_utils::TarUtils;
 pub use token_manager::TokenManager;

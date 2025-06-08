@@ -10,11 +10,15 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "docker-image-pusher",
-    version = "0.2.0",
+    version = "0.2.2",
     about = "Docker 镜像操作工具 - 支持4种核心操作模式",
     long_about = "高性能的 Docker 镜像管理工具，支持从 registry 拉取镜像、从 tar 文件提取镜像、缓存镜像并推送到 registry。"
 )]
 pub struct Args {
+    /// Docker 镜像 tar 文件路径 (当未指定子命令时，默认执行 extract)
+    #[arg(value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
     /// 子命令
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -24,18 +28,23 @@ pub struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// 从 repository 拉取镜像并缓存
+    #[command(alias = "p")]
     Pull(PullArgs),
 
     /// 从 tar 文件提取镜像并缓存
+    #[command(alias = "e")]
     Extract(ExtractArgs),
 
     /// 推送镜像到 repository
+    #[command(alias = "ps")]
     Push(PushArgs),
 
     /// 列出缓存中的镜像
+    #[command(aliases = ["l", "ls"])]
     List(ListArgs),
 
     /// 清理缓存
+    #[command(alias = "c")]
     Clean(CleanArgs),
 }
 
@@ -59,27 +68,49 @@ impl Args {
                 Commands::List(args) => args.validate(),
                 Commands::Clean(args) => args.validate(),
             },
-            None => Err(RegistryError::Validation(
-                "No command provided. Use --help for usage information.".into(),
-            )),
+            None => {
+                // 当没有提供子命令时，默认列出缓存内容且显示帮助
+                Ok(())
+            }
         }
     }
+
+    /// 获取有效的命令，如果没有提供子命令则返回默认的 list 命令
+    pub fn get_effective_command(&self) -> Commands {
+        match &self.command {
+            Some(cmd) => cmd.clone(),
+            None => {
+                // 默认列出缓存内容
+                Commands::List(ListArgs {
+                    cache_dir: PathBuf::from(".cache"),
+                })
+            }
+        }
+    }
+
+    /// 检查是否需要显示帮助信息
+    pub fn should_show_help(&self) -> bool {
+        self.command.is_none()
+    }
+}
+
+/// 解析后的镜像信息
+#[derive(Debug, Clone)]
+pub struct ParsedImage {
+    pub registry: String,
+    pub repository: String,
+    pub tag: String,
 }
 
 /// 拉取镜像的参数
 #[derive(ClapArgs, Debug, Clone)]
 pub struct PullArgs {
-    /// Registry 地址 (默认: https://registry-1.docker.io)
-    #[arg(long, default_value = "https://registry-1.docker.io")]
-    pub registry: String,
-
-    /// Repository 名称 (例如: library/ubuntu)
-    #[arg(short, long)]
-    pub repository: String,
-
-    /// 标签或摘要 (例如: latest 或 sha256:...)
-    #[arg(short, long)]
-    pub reference: String,
+    /// 完整镜像引用 (支持多种格式):
+    /// - docker.io/library/ubuntu:latest  
+    /// - ubuntu:latest (默认使用 docker.io/library)
+    /// - ubuntu (默认标签 latest)
+    #[arg(short, long, value_name = "IMAGE")]
+    pub image: String,
 
     /// Registry 用户名
     #[arg(short, long)]
@@ -104,38 +135,42 @@ pub struct PullArgs {
     /// 超时时间（秒）
     #[arg(short = 't', long, default_value = "3600")]
     pub timeout: u64,
+
+    /// 最大并发下载数 (可以使用 --concurrent 作为别名)
+    #[arg(long, alias = "concurrent", default_value = "8")]
+    pub max_concurrent: usize,
 }
 
 impl PullArgs {
+    /// 解析镜像引用，支持多种格式
+    pub fn parse_image(&self) -> Result<ParsedImage> {
+        parse_image_reference(&self.image)
+    }
+
     pub fn validate(&self) -> Result<()> {
-        // Validate repository format
-        if self.repository.is_empty() {
+        // 验证镜像引用格式
+        if self.image.is_empty() {
             return Err(RegistryError::Validation(
-                "Repository name cannot be empty".to_string(),
+                "Image reference cannot be empty".to_string(),
             ));
         }
 
-        // Validate reference format
-        if self.reference.is_empty() {
-            return Err(RegistryError::Validation(
-                "Reference cannot be empty".to_string(),
-            ));
-        }
+        // 尝试解析镜像引用
+        self.parse_image()?;
 
-        // Validate registry URL format
-        if !self.registry.starts_with("http://") && !self.registry.starts_with("https://") {
-            return Err(RegistryError::Validation(format!(
-                "Invalid registry URL: {}. Must start with http:// or https://",
-                self.registry
-            )));
-        }
-
-        // Validate authentication configuration consistency
+        // 验证认证配置一致性
         if (self.username.is_some() && self.password.is_none())
             || (self.username.is_none() && self.password.is_some())
         {
             return Err(RegistryError::Validation(
                 "Username and password must be provided together".to_string(),
+            ));
+        }
+
+        // 验证并发参数
+        if self.max_concurrent == 0 {
+            return Err(RegistryError::Validation(
+                "max_concurrent must be greater than 0".to_string(),
             ));
         }
 
@@ -173,24 +208,18 @@ impl ExtractArgs {
     }
 }
 
-/// 推送镜像的参数
+/// 推送镜像的参数  
 #[derive(ClapArgs, Debug, Clone)]
 pub struct PushArgs {
     /// 源镜像 (格式: repository:tag 或 tar 文件路径)
     #[arg(short, long)]
     pub source: String,
 
-    /// 目标 Registry 地址 (默认: https://registry-1.docker.io)
-    #[arg(long, default_value = "https://registry-1.docker.io")]
-    pub registry: String,
-
-    /// 目标 Repository 名称
-    #[arg(short, long)]
-    pub repository: String,
-
-    /// 目标标签
-    #[arg(short, long)]
-    pub reference: String,
+    /// 目标镜像引用 (支持多种格式):
+    /// - docker.io/library/ubuntu:latest
+    /// - ubuntu:latest (默认使用 docker.io/library)
+    #[arg(short, long, value_name = "TARGET")]
+    pub target: String,
 
     /// Registry 用户名
     #[arg(short, long)]
@@ -213,20 +242,12 @@ pub struct PushArgs {
     pub verbose: bool,
 
     /// 超时时间（秒）
-    #[arg(short = 't', long, default_value = "7200")]
+    #[arg(long, default_value = "7200")]
     pub timeout: u64,
 
-    /// 重试次数
-    #[arg(long, default_value = "3")]
-    pub retry_attempts: usize,
-
-    /// 最大并发上传数
-    #[arg(long, default_value = "1")]
+    /// 最大并发上传数 (基础设置，AdaptiveConcurrencyManager 会动态调整)
+    #[arg(long, alias = "concurrent", default_value = "8")]
     pub max_concurrent: usize,
-
-    /// 大层阈值（字节）
-    #[arg(long, default_value = "1073741824")]
-    pub large_layer_threshold: u64,
 
     /// 跳过已存在的层
     #[arg(long, action = ArgAction::SetTrue)]
@@ -239,13 +260,14 @@ pub struct PushArgs {
     /// 验证模式（不实际上传）
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
-
-    /// 使用高级并发上传器（带动态调节和性能优化）
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub use_concurrent_uploader: bool,
 }
 
 impl PushArgs {
+    /// 解析目标镜像引用
+    pub fn parse_target(&self) -> Result<ParsedImage> {
+        parse_image_reference(&self.target)
+    }
+
     pub fn validate(&self) -> Result<()> {
         // Validate source format
         if self.source.is_empty() {
@@ -254,29 +276,17 @@ impl PushArgs {
             ));
         }
 
-        // Validate repository format
-        if self.repository.is_empty() {
+        // 验证目标镜像引用格式
+        if self.target.is_empty() {
             return Err(RegistryError::Validation(
-                "Repository name cannot be empty".to_string(),
+                "Target image reference cannot be empty".to_string(),
             ));
         }
 
-        // Validate reference format
-        if self.reference.is_empty() {
-            return Err(RegistryError::Validation(
-                "Reference cannot be empty".to_string(),
-            ));
-        }
+        // 尝试解析目标镜像引用
+        self.parse_target()?;
 
-        // 验证registry URL格式
-        if !self.registry.starts_with("http://") && !self.registry.starts_with("https://") {
-            return Err(RegistryError::Validation(format!(
-                "Invalid registry URL: {}. Must start with http:// or https://",
-                self.registry
-            )));
-        }
-
-        // 验证认证配置的一致性
+        // 验证认证配置一致性
         if (self.username.is_some() && self.password.is_none())
             || (self.username.is_none() && self.password.is_some())
         {
@@ -285,22 +295,26 @@ impl PushArgs {
             ));
         }
 
-        // 验证并发数量
+        // 验证并发参数
         if self.max_concurrent == 0 {
             return Err(RegistryError::Validation(
                 "max_concurrent must be greater than 0".to_string(),
             ));
         }
 
-        // 验证冲突选项
+        // 验证冲突的参数
         if self.skip_existing && self.force_upload {
             return Err(RegistryError::Validation(
                 "Cannot specify both --skip-existing and --force-upload".to_string(),
             ));
         }
 
-        // 验证source是tar文件时的路径存在性
-        if self.source.ends_with(".tar") || self.source.ends_with(".tar.gz") {
+        // 如果source不是tar文件，验证它是否存在于缓存中
+        if !self.is_tar_source() {
+            // 这里应该验证缓存中是否存在该镜像，但需要访问缓存
+            // 暂时只检查格式
+        } else {
+            // 验证tar文件存在
             let source_path = std::path::Path::new(&self.source);
             if !source_path.exists() {
                 return Err(RegistryError::Validation(format!(
@@ -368,70 +382,170 @@ impl CleanArgs {
     }
 }
 
+/// 解析镜像引用，支持多种格式
+/// 
+/// 支持的格式:
+/// - docker.io/library/ubuntu:latest
+/// - ubuntu:latest (默认使用 docker.io/library)
+/// - ubuntu (默认标签 latest)
+pub fn parse_image_reference(image_ref: &str) -> Result<ParsedImage> {
+    let image_ref = image_ref.trim();
+    
+    if image_ref.is_empty() {
+        return Err(RegistryError::Validation(
+            "Image reference cannot be empty".to_string(),
+        ));
+    }
+
+    // 首先分离标签部分
+    let (image_part, tag) = if let Some(colon_pos) = image_ref.rfind(':') {
+        // 检查冒号后面是否是端口号（如果包含 '/' 则不是标签）
+        let after_colon = &image_ref[colon_pos + 1..];
+        if after_colon.contains('/') {
+            // 这是端口号，没有标签
+            (image_ref, "latest")
+        } else {
+            // 这是标签
+            (&image_ref[..colon_pos], after_colon)
+        }
+    } else {
+        // 没有冒号，使用默认标签
+        (image_ref, "latest")
+    };
+
+    // 解析注册表和仓库部分
+    let parts: Vec<&str> = image_part.split('/').collect();
+    
+    let (registry, repository) = match parts.len() {
+        1 => {
+            // 格式: ubuntu
+            ("https://registry-1.docker.io".to_string(), format!("library/{}", parts[0]))
+        }
+        2 => {
+            // 可能是: library/ubuntu 或 registry.com/repo
+            if parts[0].contains('.') || parts[0].contains(':') {
+                // 包含域名或端口，这是自定义注册表
+                let registry_url = if parts[0].starts_with("http://") || parts[0].starts_with("https://") {
+                    parts[0].to_string()
+                } else {
+                    format!("https://{}", parts[0])
+                };
+                (registry_url, parts[1].to_string())
+            } else {
+                // 这是 Docker Hub 的 namespace/repository 格式
+                ("https://registry-1.docker.io".to_string(), format!("{}/{}", parts[0], parts[1]))
+            }
+        }
+        3 => {
+            // 格式: registry.com/namespace/repo
+            let registry_url = if parts[0].starts_with("http://") || parts[0].starts_with("https://") {
+                parts[0].to_string()
+            } else {
+                format!("https://{}", parts[0])
+            };
+            (registry_url, format!("{}/{}", parts[1], parts[2]))
+        }
+        _ => {
+            // 更复杂的路径，将第一部分作为注册表，其余作为仓库路径
+            let registry_url = if parts[0].starts_with("http://") || parts[0].starts_with("https://") {
+                parts[0].to_string()
+            } else {
+                format!("https://{}", parts[0])
+            };
+            let repository_path = parts[1..].join("/");
+            (registry_url, repository_path)
+        }
+    };
+
+    Ok(ParsedImage {
+        registry,
+        repository,
+        tag: tag.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_validation_no_command() {
-        let args = Args { command: None };
-        assert!(args.validate().is_err());
+        let args = Args { 
+            file: None,
+            command: None 
+        };
+        assert!(args.validate().is_ok()); 
     }
 
     #[test]
     fn test_validation_credentials_mismatch() {
         let args = PullArgs {
-            registry: "https://registry.example.com".to_string(),
-            repository: "test".to_string(),
-            reference: "latest".to_string(),
+            image: "registry.example.com/test:latest".to_string(),
             username: Some("user".to_string()),
             password: None, // Missing password
             skip_tls: false,
             cache_dir: PathBuf::from(".cache"),
             verbose: false,
             timeout: 3600,
+            max_concurrent: 8,
         };
 
         assert!(args.validate().is_err());
     }
 
     #[test]
-    fn test_validation_invalid_registry_url() {
-        let args = PullArgs {
-            registry: "invalid-url".to_string(),
-            repository: "test".to_string(),
-            reference: "latest".to_string(),
-            username: None,
-            password: None,
-            skip_tls: false,
-            cache_dir: PathBuf::from(".cache"),
-            verbose: false,
-            timeout: 3600,
-        };
+    fn test_parse_image_simple() {
+        let parsed = parse_image_reference("ubuntu").unwrap();
+        assert_eq!(parsed.registry, "https://registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/ubuntu");
+        assert_eq!(parsed.tag, "latest");
+    }
 
-        assert!(args.validate().is_err());
+    #[test]
+    fn test_parse_image_with_tag() {
+        let parsed = parse_image_reference("ubuntu:22.04").unwrap();
+        assert_eq!(parsed.registry, "https://registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/ubuntu");
+        assert_eq!(parsed.tag, "22.04");
+    }
+
+    #[test]
+    fn test_parse_image_with_namespace() {
+        let parsed = parse_image_reference("library/ubuntu:latest").unwrap();
+        assert_eq!(parsed.registry, "https://registry-1.docker.io");
+        assert_eq!(parsed.repository, "library/ubuntu");
+        assert_eq!(parsed.tag, "latest");
+    }
+
+
+    #[test]
+    fn test_parse_image_custom_registry_with_port() {
+        let parsed = parse_image_reference("localhost:5000/myapp:latest").unwrap();
+        assert_eq!(parsed.registry, "https://localhost:5000");
+        assert_eq!(parsed.repository, "myapp");
+        assert_eq!(parsed.tag, "latest");
+    }
+
+    #[test]
+    fn test_parse_image_empty() {
+        assert!(parse_image_reference("").is_err());
     }
 
     #[test]
     fn test_validation_max_concurrent() {
         let args = PushArgs {
             source: "test:latest".to_string(),
-            registry: "https://registry.example.com".to_string(),
-            repository: "test".to_string(),
-            reference: "latest".to_string(),
+            target: "registry.example.com/test:latest".to_string(),
             username: None,
             password: None,
             skip_tls: false,
             cache_dir: PathBuf::from(".cache"),
             verbose: false,
             timeout: 7200,
-            retry_attempts: 3,
             max_concurrent: 0, // Invalid value
-            large_layer_threshold: 1073741824,
             skip_existing: false,
             force_upload: false,
-            dry_run: false,
-            use_concurrent_uploader: false,
+            dry_run: false
         };
 
         assert!(args.validate().is_err());

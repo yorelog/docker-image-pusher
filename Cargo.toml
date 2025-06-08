@@ -1,6 +1,6 @@
 [package]
 name = "docker-image-pusher"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 authors = ["yorelog <yorelog@gmail.com>"]
 description = "High-performance command-line tool for pushing Docker image tar packages directly to Docker registries"
@@ -28,6 +28,7 @@ futures = "0.3"
 async-trait = "0.1"
 url = "2.5"
 futures-util = "0.3"
+uuid = "1.17.0"
 
 # Examples showcasing the 4 core operation modes
 [[example]]

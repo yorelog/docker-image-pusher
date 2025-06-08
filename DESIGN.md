@@ -213,19 +213,362 @@ OPTIONS:
 - 可配置的详细程度
 - 结构化的日志输出
 
-## Docker Registry API 兼容性
+## 统一进度显示系统
 
-支持 Docker Registry API v2 的所有核心端点：
+### 系统架构
 
-1. `/v2/` - 基本连接测试
-2. `/v2/<name>/manifests/<reference>` - manifest操作
-3. `/v2/<name>/blobs/<digest>` - blob获取
-4. `/v2/<name>/blobs/uploads/` - blob上传
-5. `/v2/<name>/tags/list` - 标签列表
+新的进度显示系统为 push 和 pull 操作提供统一的实时进度跟踪和显示功能。该系统基于以下核心组件：
 
-## 安全考虑
+#### 进度状态跟踪 (ProgressState)
 
-1. 认证信息不记录到日志
-2. 默认使用HTTPS，可选跳过TLS验证
-3. 数据完整性校验
-4. 权限最小化原则
+```rust
+pub struct ProgressState {
+    pub total_tasks: usize,           // 总任务数量
+    pub completed_tasks: usize,       // 已完成任务数量
+    pub failed_tasks: usize,          // 失败任务数量
+    pub active_tasks: Arc<RwLock<HashMap<String, TaskProgress>>>, // 活跃任务状态
+    pub start_time: Instant,          // 开始时间
+    pub last_update: Instant,         // 最后更新时间
+    pub concurrency_adjustments: Vec<ConcurrencyAdjustment>, // 并发调整历史
+}
+```
+
+#### 任务进度 (TaskProgress)
+
+```rust
+pub struct TaskProgress {
+    pub task_id: String,             // 任务唯一标识
+    pub description: String,         // 任务描述
+    pub processed_bytes: u64,        // 已处理字节数
+    pub total_bytes: u64,           // 总字节数
+    pub start_time: Instant,        // 任务开始时间
+    pub status: String,             // 任务状态
+}
+```
+
+#### 并发调整记录 (ConcurrencyAdjustment)
+
+```rust
+pub struct ConcurrencyAdjustment {
+    pub timestamp: Instant,          // 调整时间
+    pub old_concurrency: usize,      // 调整前并发数
+    pub new_concurrency: usize,      // 调整后并发数
+    pub reason: String,              // 调整原因
+}
+```
+
+### 进度显示功能
+
+#### 实时进度显示
+
+- **主进度条**: 显示总体完成百分比和速度统计
+- **任务状态**: 显示当前活跃任务的详细进度
+- **并发管理**: 实时显示当前并发数量和调整状态
+- **性能指标**: 包括吞吐量、平均速度和估计剩余时间
+
+#### 详细状态显示
+
+提供两种显示模式：
+
+1. **简洁模式** (`display_live_progress`):
+   ```
+   [████████████████████████████████████████] 85% (17/20) Speed: 2.3 MB/s ETA: 30s
+   Active: [task-1: 75%] [task-2: 40%] [task-3: 90%] Concurrency: 3
+   ```
+
+2. **详细模式** (`display_detailed_progress`):
+   ```
+   === Progress Details ===
+   Total Tasks: 20 | Completed: 17 | Failed: 0 | Active: 3
+   Overall Progress: 85.0% | Runtime: 2m 30s
+   
+   Active Tasks:
+   - task-1: Uploading layer sha256:abc123... (15.2 MB / 20.0 MB) 75%
+   - task-2: Uploading layer sha256:def456... (8.1 MB / 20.0 MB) 40%
+   - task-3: Uploading layer sha256:ghi789... (18.0 MB / 20.0 MB) 90%
+   
+   Concurrency: 3 | Adjustments: 2 | Last: Increased from 2 to 3 (high success rate)
+   Performance: Avg 2.3 MB/s | Current 2.8 MB/s | ETA: 30s
+   ```
+
+### 统一管道集成 (Unified Pipeline)
+
+#### 任务执行流程
+
+新的统一管道 (`unified_pipeline.rs`) 集成了进度跟踪系统：
+
+```rust
+impl UnifiedPipeline {
+    pub async fn execute_tasks(
+        &self,
+        tasks: Vec<Task>,
+        max_concurrency: usize,
+        progress_state: Arc<RwLock<ProgressState>>,
+    ) -> Result<Vec<TaskResult>>;
+    
+    async fn execute_single_task_with_progress(
+        &self,
+        task: Task,
+        progress_state: Arc<RwLock<ProgressState>>,
+    ) -> Result<TaskResult>;
+}
+```
+
+#### 进度通知系统
+
+提供标准化的通知接口：
+
+```rust
+impl OutputManager {
+    pub fn notify_task_start(&self, task_id: &str, description: &str);
+    pub fn notify_task_complete(&self, task_id: &str, success: bool);
+    pub fn notify_concurrency_adjustment(&self, old: usize, new: usize, reason: &str);
+}
+```
+
+### 认证逻辑统一
+
+#### 统一认证方法
+
+创建了 `authenticate_with_registry` 方法，消除了 push 和 pull 操作的认证代码重复：
+
+```rust
+impl Runner {
+    async fn authenticate_with_registry(
+        &self,
+        auth_info: Option<(String, String)>,
+        registry_url: &str,
+        skip_tls: bool,
+    ) -> Result<(RegistryClient, Option<String>)>;
+}
+```
+
+该方法支持：
+- 有凭据认证（用户名/密码）
+- 匿名认证
+- TLS 配置管理
+- 错误统一处理
+
+### 操作模式集成
+
+#### Mode 1: Pull and Cache
+- 使用 unified pipeline 进行并行下载
+- 实时显示下载进度和速度
+- 支持断点续传和错误重试
+
+#### Mode 5: Push from Tar (Optimized)  
+- 使用 unified pipeline 进行并行上传
+- 实时显示上传进度和并发状态
+- 动态调整并发数量以优化性能
+
+### 配置选项
+
+进度显示系统支持以下配置：
+
+- `--max-concurrent`: 最大并发任务数
+- `--progress-detail`: 进度显示详细程度 (simple/detailed)
+- `--progress-interval`: 进度更新间隔 (毫秒)
+- `--disable-progress`: 禁用进度显示
+
+## 动态并发管理系统 (重新设计)
+
+### 系统概述
+
+动态并发管理系统现已独立为专门的模块，提供智能的并发控制机制，能够根据实际传输性能自动调整并发任务数，以优化传输效率和资源利用率。该系统采用模块化设计，支持多种并发策略和性能监控算法。
+
+### 架构设计
+
+#### 核心接口 (ConcurrencyController)
+
+```rust
+pub trait ConcurrencyController: Send + Sync {
+    fn current_concurrency(&self) -> usize;
+    fn update_metrics(&self, bytes_transferred: u64, elapsed: Duration);
+    async fn acquire_permits(&self, count: usize) -> Result<Vec<ConcurrencyPermit>, ConcurrencyError>;
+    fn should_adjust_concurrency(&self) -> bool;
+    fn get_statistics(&self) -> ConcurrencyStatistics;
+}
+```
+
+#### 模块组织
+
+```
+src/concurrency/
+├── mod.rs              # 模块入口和核心接口
+├── config.rs           # 配置管理
+├── manager.rs          # 并发管理器实现
+├── strategy.rs         # 策略选择和实现
+└── monitor.rs          # 性能监控和分析
+```
+
+### 并发管理器类型
+
+#### 1. DynamicConcurrencyManager
+- **用途**: 基于性能反馈的动态调整
+- **算法**: 统计回归分析 + 策略选择
+- **特性**: 自适应、高精度、实时调整
+
+#### 2. FixedConcurrencyManager  
+- **用途**: 固定并发数控制
+- **算法**: 简单信号量控制
+- **特性**: 稳定、可预测、低开销
+
+#### 3. AdaptiveConcurrencyManager
+- **用途**: 机器学习增强的并发控制
+- **算法**: 神经网络 + 强化学习
+- **特性**: 智能预测、长期优化、自我进化
+
+### 策略系统
+
+#### 策略类型 (ConcurrencyStrategy)
+
+```rust
+pub enum ConcurrencyStrategy {
+    Conservative,           // 保守策略：稳定性优先
+    Aggressive,            // 激进策略：性能优先
+    Adaptive,              // 自适应策略：平衡性能和稳定性
+    NetworkOptimized,      // 网络优化策略：基于网络特性
+    ResourceAware,         // 资源感知策略：考虑系统资源
+    MLEnhanced,           // 机器学习增强策略
+}
+```
+
+#### 策略选择器 (StrategySelector)
+
+```rust
+pub struct StrategySelector {
+    current_strategy: ConcurrencyStrategy,
+    selector_algorithm: Box<dyn StrategyAlgorithm>,
+    performance_history: Vec<PerformanceSnapshot>,
+    strategy_performance: HashMap<ConcurrencyStrategy, PerformanceMetrics>,
+}
+```
+
+### 性能监控系统
+
+#### 监控组件 (PerformanceMonitor)
+
+```rust
+pub struct PerformanceMonitor {
+    data_points: VecDeque<SpeedDataPoint>,
+    regression_analyzer: RegressionAnalyzer,
+    trend_detector: TrendDetector,
+    confidence_calculator: ConfidenceCalculator,
+}
+```
+
+#### 分析能力
+
+1. **回归分析**: 预测传输速度趋势
+2. **置信度计算**: 评估预测可靠性
+3. **趋势检测**: 识别性能变化模式
+4. **异常检测**: 发现性能异常情况
+
+### 配置系统
+
+#### 层次化配置 (ConcurrencyConfig)
+
+```rust
+pub struct ConcurrencyConfig {
+    pub limits: ConcurrencyLimits,         // 基础限制
+    pub dynamic: DynamicSettings,          // 动态调整设置
+    pub monitoring: MonitoringConfig,      // 监控配置
+    pub strategy: StrategyConfig,          // 策略配置
+}
+```
+
+#### 预定义配置
+
+- `ConcurrencyConfig::for_small_files()`: 小文件优化
+- `ConcurrencyConfig::for_large_files()`: 大文件优化
+- `ConcurrencyConfig::conservative()`: 保守配置
+- `ConcurrencyConfig::aggressive()`: 激进配置
+
+### 集成接口
+
+#### 工厂模式 (ConcurrencyFactory)
+
+```rust
+impl ConcurrencyFactory {
+    pub fn create_dynamic_manager(config: ConcurrencyConfig) -> Box<dyn ConcurrencyController>;
+    pub fn create_fixed_manager(max_concurrency: usize) -> Box<dyn ConcurrencyController>;
+    pub fn create_adaptive_manager(config: ConcurrencyConfig) -> Box<dyn ConcurrencyController>;
+}
+```
+
+#### 与 UnifiedPipeline 集成
+
+```rust
+impl UnifiedPipeline {
+    pub fn with_concurrency_manager(
+        mut self, 
+        manager: Box<dyn ConcurrencyController>
+    ) -> Self;
+    
+    pub async fn execute_with_concurrency_control(
+        &self,
+        tasks: Vec<PipelineTask>,
+        concurrency_manager: &dyn ConcurrencyController,
+    ) -> Result<Vec<TaskResult>>;
+}
+```
+
+### 命令行集成
+
+#### 新增参数
+
+```bash
+# 并发管理器类型
+--concurrency-manager <TYPE>        # dynamic, fixed, adaptive
+
+# 动态并发配置
+--enable-dynamic-concurrency
+--min-concurrent <N>
+--max-concurrent <N>
+--adjustment-factor <FACTOR>
+--speed-threshold <BYTES_PER_SEC>
+
+# 性能监控配置
+--enable-monitoring
+--sample-interval <MILLISECONDS>
+--confidence-threshold <0.0-1.0>
+
+# 策略配置
+--concurrency-strategy <STRATEGY>   # conservative, aggressive, adaptive
+--auto-strategy-switching
+--strategy-switch-confidence <0.0-1.0>
+```
+
+### 性能特性
+
+#### 内存效率
+- 限制历史数据大小
+- 使用环形缓冲区存储样本
+- 自动清理过期数据
+
+#### 线程安全
+- 所有状态使用 Arc<RwLock<>> 保护
+- 原子操作用于高频更新
+- 无锁数据结构优化热路径
+
+#### 实时响应
+- 亚秒级性能监控
+- 快速策略切换
+- 低延迟permit获取
+
+### 扩展性设计
+
+#### 插件系统
+- 自定义策略插件接口
+- 外部监控系统集成
+- 第三方性能分析工具
+
+#### 配置热更新
+- 运行时配置修改
+- 无中断策略切换
+- 动态阈值调整
+
+#### 可观测性
+- 详细的性能指标导出
+- 实时状态监控API
+- 历史数据持久化

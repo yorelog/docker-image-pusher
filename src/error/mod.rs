@@ -90,3 +90,9 @@ impl From<std::string::FromUtf8Error> for RegistryError {
         RegistryError::Parse(format!("UTF-8 conversion error: {}", err))
     }
 }
+
+impl From<crate::concurrency::ConcurrencyError> for RegistryError {
+    fn from(err: crate::concurrency::ConcurrencyError) -> Self {
+        RegistryError::Registry(format!("Concurrency error: {}", err))
+    }
+}

@@ -29,23 +29,8 @@ async-trait = "0.1"
 url = "2.5"
 futures-util = "0.3"
 uuid = "1.17.0"
+oci-client = "0.15.0"
 
-# Examples showcasing the 4 core operation modes
-[[example]]
-name = "pull_and_cache_demo"
-path = "examples/pull_and_cache_demo.rs"
-
-[[example]]
-name = "extract_and_cache_demo"
-path = "examples/extract_and_cache_demo.rs"
-
-[[example]]
-name = "push_from_cache_manifest_demo"
-path = "examples/push_from_cache_manifest_demo.rs"
-
-[[example]]
-name = "push_from_cache_tar_demo"
-path = "examples/push_from_cache_tar_demo.rs"
 
 [[example]]
 name = "comprehensive_demo"
@@ -56,15 +41,9 @@ name = "optimized_upload_demo"
 path = "examples/optimized_upload_demo.rs"
 
 [[example]]
-name = "auth_test_demo"
-path = "examples/auth_test_demo.rs"
+name = "oci_client_integration_demo"
+path = "examples/oci_client_integration_demo.rs"
 
-[[example]]
-name = "large_image_test_demo"
-path = "examples/large_image_test_demo.rs"
 
-[[example]]
-name = "push_to_aliyun_demo"
-path = "examples/push_to_aliyun_demo.rs"
 
 

@@ -1,11 +1,12 @@
 //! Enhanced registry client with better configuration and error handling
 
 use crate::cli::config::AuthConfig;
-use crate::error::handlers::NetworkErrorHandler;
 use crate::error::{RegistryError, Result};
-use crate::image::manifest::{ManifestType, parse_manifest};
 use crate::logging::Logger;
 use crate::registry::auth::Auth;
+use async_trait::async_trait;
+use crate::registry::operations::{AuthOperations, BlobOperations, ManifestOperations, RepositoryOperations};
+use crate::registry::oci_client::{OciClientAdapter, OciRegistryOperations};
 use crate::registry::token_manager::TokenManager;
 use reqwest::Client;
 use std::io::Read;
@@ -18,6 +19,13 @@ pub struct RegistryClient {
     address: String,
     output: Logger,
     token_manager: Option<TokenManager>,
+    // Operations modules for better organization
+    auth_operations: AuthOperations,
+    blob_operations: BlobOperations,
+    manifest_operations: ManifestOperations,
+    repository_operations: RepositoryOperations,
+    // OCI client for alternative implementation
+    oci_client: Option<OciClientAdapter>,
 }
 
 #[derive(Debug)]
@@ -92,44 +100,69 @@ impl RegistryClientBuilder {
 
         let auth = Auth::new();
 
+        // Create operations modules
+        let auth_operations = AuthOperations::new(client.clone(), auth.clone(), self.address.clone(), output.clone());
+        let blob_operations = BlobOperations::new(client.clone(), self.address.clone(), output.clone(), None);
+        let manifest_operations = ManifestOperations::new(client.clone(), self.address.clone(), output.clone());
+        let repository_operations = RepositoryOperations::new(client.clone(), self.address.clone(), output.clone());
+
+        // Create and enable OCI client by default
+        let oci_client = if let Some(auth_config) = self.auth_config {
+            output.verbose("Building OCI client with authentication...");
+            Some(OciClientAdapter::with_auth(
+                self.address.clone(),
+                &auth_config,
+                output.clone(),
+            )?)
+        } else {
+            output.verbose("Building OCI client without authentication...");
+            Some(OciClientAdapter::new(self.address.clone(), output.clone())?)
+        };
+
+        output.success("OCI client enabled by default for reliable operations");
+
         Ok(RegistryClient {
             client,
             auth,
             address: self.address,
             output,
             token_manager: None,
+            auth_operations,
+            blob_operations,
+            manifest_operations,
+            repository_operations,
+            oci_client,
         })
     }
 }
 
 impl RegistryClient {
+    /// Set token manager for all operations
+    pub fn with_token_manager(mut self, token_manager: Option<TokenManager>) -> Self {
+        self.token_manager = token_manager.clone();
+        
+        // Update all operations modules with the token manager
+        self.auth_operations = self.auth_operations.with_token_manager(token_manager.clone());
+        self.blob_operations = self.blob_operations.with_token_manager(token_manager.clone());
+        self.manifest_operations = self.manifest_operations.with_token_manager(token_manager.clone());
+        self.repository_operations = self.repository_operations.with_token_manager(token_manager);
+        
+        self
+    }
+
     pub async fn test_connectivity(&self) -> Result<()> {
-        self.output.verbose("Testing registry connectivity...");
-
-        let url = format!("{}/v2/", self.address);
-        let response =
-            self.client.get(&url).send().await.map_err(|e| {
-                RegistryError::Network(format!("Failed to connect to registry: {}", e))
-            })?;
-
-        self.output
-            .verbose(&format!("Registry response status: {}", response.status()));
-
-        if response.status().is_success() || response.status() == 401 {
-            // 401 is expected for registries that require authentication
-            self.output.verbose("Registry connectivity test passed");
-            Ok(())
-        } else {
-            Err(RegistryError::Registry(format!(
-                "Registry connectivity test failed with status: {}",
-                response.status()
-            )))
-        }
+        self.auth_operations.test_connectivity().await
     }
 
     pub async fn check_blob_exists(&self, digest: &str, repository: &str) -> Result<bool> {
-        self.check_blob_exists_with_token(digest, repository, &None)
-            .await
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for blob existence check");
+            oci_client.blob_exists(repository, digest).await
+        } else {
+            self.output.verbose("Falling back to legacy blob existence check");
+            self.blob_operations.check_blob_exists(digest, repository).await
+        }
     }
 
     pub async fn check_blob_exists_with_token(
@@ -138,87 +171,24 @@ impl RegistryClient {
         repository: &str,
         token: &Option<String>,
     ) -> Result<bool> {
-        // Ensure digest has proper sha256: prefix
-        let normalized_digest = if digest.starts_with("sha256:") {
-            digest.to_string()
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for blob existence check");
+            // If we have a token, create bearer auth for this operation
+            if let Some(token_str) = token {
+                let auth = oci_client::secrets::RegistryAuth::Bearer(token_str.clone());
+                oci_client.blob_exists_with_auth(repository, digest, &auth).await
+            } else {
+                oci_client.blob_exists(repository, digest).await
+            }
         } else {
-            format!("sha256:{}", digest)
-        };
-
-        let url = format!(
-            "{}/v2/{}/blobs/{}",
-            self.address, repository, normalized_digest
-        );
-
-        self.output.detail(&format!(
-            "Checking blob existence: {}",
-            &normalized_digest[..23]
-        ));
-
-        // Use HEAD request to check existence without downloading
-        let mut request = self.client.head(&url);
-
-        // Add authentication if token is provided
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await.map_err(|e| {
-            self.output
-                .warning(&format!("Failed to check blob existence: {}", e));
-            NetworkErrorHandler::handle_network_error(&e, "blob existence check")
-        })?;
-
-        let status = response.status();
-
-        match status.as_u16() {
-            200 => {
-                self.output
-                    .detail(&format!("Blob {} exists", &normalized_digest[..16]));
-                Ok(true)
-            }
-            404 => {
-                self.output
-                    .detail(&format!("Blob {} does not exist", &normalized_digest[..16]));
-                Ok(false)
-            }
-            401 => {
-                self.output
-                    .warning("Authentication required for blob check");
-                // Return false if we still get 401 even with auth token
-                Ok(false)
-            }
-            403 => {
-                self.output.warning("Permission denied for blob check");
-                // Assume blob doesn't exist if we can't check permissions
-                Ok(false)
-            }
-            _ => {
-                self.output.warning(&format!(
-                    "Unexpected status {} when checking blob existence",
-                    status
-                ));
-                // On other errors, assume blob doesn't exist to be safe
-                Ok(false)
-            }
+            self.output.verbose("Falling back to legacy blob existence check");
+            self.blob_operations.check_blob_exists_with_token(digest, repository, token).await
         }
     }
 
     pub async fn authenticate(&self, auth_config: &AuthConfig) -> Result<Option<String>> {
-        self.output.verbose("Authenticating with registry...");
-
-        let token = self
-            .auth
-            .login(&auth_config.username, &auth_config.password, &self.output)
-            .await?;
-
-        if token.is_some() {
-            self.output.success("Authentication successful");
-        } else {
-            self.output.info("No authentication required");
-        }
-
-        Ok(token)
+        self.auth_operations.authenticate(auth_config).await
     }
 
     pub async fn authenticate_for_repository(
@@ -226,34 +196,7 @@ impl RegistryClient {
         auth_config: &AuthConfig,
         repository: &str,
     ) -> Result<Option<String>> {
-        self.output.verbose(&format!(
-            "Authenticating for repository access: {}",
-            repository
-        ));
-
-        // Use the new Docker Registry API v2 compliant authentication
-        let token = self
-            .auth
-            .authenticate_with_registry(
-                &self.address,
-                repository,
-                Some(&auth_config.username),
-                Some(&auth_config.password),
-                &self.output,
-            )
-            .await?;
-
-        if token.is_some() {
-            self.output.success(&format!(
-                "Repository authentication successful for: {}",
-                repository
-            ));
-        } else {
-            self.output
-                .info("No repository-specific authentication required");
-        }
-
-        Ok(token)
+        self.auth_operations.authenticate_for_repository(auth_config, repository).await
     }
 
     /// 统一的blob上传方法（合并upload_blob和upload_blob_with_token）
@@ -264,53 +207,19 @@ impl RegistryClient {
         repository: &str,
         token: &Option<String>,
     ) -> Result<String> {
-        self.output.info(&format!(
-            "Uploading blob {} ({}) to {}",
-            &digest[..16],
-            self.output.format_size(data.len() as u64),
-            repository
-        ));
-
-        // 检查blob是否已存在
-        if self
-            .check_blob_exists_with_token(digest, repository, token)
-            .await?
-        {
-            self.output
-                .info(&format!("Blob {} already exists, skipping", &digest[..16]));
-            return Ok(digest.to_string());
-        }
-
-        // 使用单阶段上传（Monolithic Upload）- 更兼容各种registry
-        let url = format!("{}/v2/{}/blobs/uploads/?digest={}", self.address, repository, digest);
-
-        let mut request = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Length", data.len().to_string())
-            .body(data.to_vec());
-
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-
-        if response.status().is_success() {
-            self.output
-                .success(&format!("Blob {} uploaded successfully", &digest[..16]));
-            Ok(digest.to_string())
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for blob push");
+            // If we have a token, create bearer auth for this operation
+            if let Some(token_str) = token {
+                let auth = oci_client::secrets::RegistryAuth::Bearer(token_str.clone());
+                oci_client.push_blob_with_auth(repository, data, digest, &auth).await
+            } else {
+                oci_client.push_blob(repository, data, digest).await
+            }
         } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-            Err(RegistryError::Upload(format!(
-                "Blob upload failed (status {}): {}",
-                status, error_text
-            )))
+            self.output.verbose("Falling back to legacy blob push");
+            self.blob_operations.upload_blob_with_token(data, digest, repository, token).await
         }
     }
 
@@ -322,58 +231,27 @@ impl RegistryClient {
         reference: &str,
         token: &Option<String>,
     ) -> Result<()> {
-        let url = format!("{}/v2/{}/manifests/{}", self.address, repository, reference);
-
-        // Parse manifest to detect content type
-        let content_type = match parse_manifest(manifest.as_bytes()) {
-            Ok(manifest_json) => {
-                let media_type = manifest_json
-                    .get("mediaType")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("application/vnd.docker.distribution.manifest.v2+json");
-
-                let manifest_type = ManifestType::from_media_type(media_type);
-                manifest_type.to_content_type()
+        use crate::image::manifest::convert_oci_to_docker_v2;
+        
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for manifest push");
+            
+            // Convert OCI manifest to Docker V2 format for better registry compatibility
+            let docker_manifest_bytes = convert_oci_to_docker_v2(manifest.as_bytes())?;
+            self.output.verbose("Converted manifest to Docker V2 format for registry compatibility");
+            
+            // If we have a token, create bearer auth for this operation
+            if let Some(token_str) = token {
+                let auth = oci_client::secrets::RegistryAuth::Bearer(token_str.clone());
+                let _ = oci_client.push_manifest_with_auth(repository, reference, &docker_manifest_bytes, &auth).await?;
+            } else {
+                let _ = oci_client.push_manifest(repository, reference, &docker_manifest_bytes).await?;
             }
-            Err(_) => {
-                // Fallback to Docker v2 if parsing fails
-                "application/vnd.docker.distribution.manifest.v2+json"
-            }
-        };
-
-        self.output.verbose(&format!(
-            "Uploading manifest with content-type: {}",
-            content_type
-        ));
-
-        let mut request = self
-            .client
-            .put(&url)
-            .header("Content-Type", content_type)
-            .body(manifest.to_string());
-
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await?;
-
-        if response.status().is_success() {
-            self.output.success(&format!(
-                "Manifest uploaded successfully for {}:{}",
-                repository, reference
-            ));
             Ok(())
         } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-            Err(RegistryError::Registry(format!(
-                "Failed to upload manifest: HTTP {} - {}",
-                status, error_text
-            )))
+            self.output.verbose("Falling back to legacy manifest push");
+            self.manifest_operations.upload_manifest_with_token(manifest, repository, reference, token).await
         }
     }
 
@@ -383,68 +261,14 @@ impl RegistryClient {
         reference: &str,
         token: &Option<String>,
     ) -> Result<Vec<u8>> {
-        self.output.verbose(&format!(
-            "Pulling manifest for {}/{}",
-            repository, reference
-        ));
-
-        let url = format!("{}/v2/{}/manifests/{}", self.address, repository, reference);
-
-        let mut request = self.client.get(&url).header(
-            "Accept",
-            "application/vnd.docker.distribution.manifest.v2+json, \
-                 application/vnd.docker.distribution.manifest.list.v2+json, \
-                 application/vnd.oci.image.manifest.v1+json, \
-                 application/vnd.oci.image.index.v1+json",
-        );
-
-        // 添加授权头（如果提供了 token）
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await.map_err(|e| {
-            self.output
-                .error(&format!("Failed to pull manifest: {}", e));
-            NetworkErrorHandler::handle_network_error(&e, "manifest pull")
-        })?;
-
-        if response.status().is_success() {
-            self.output.success(&format!(
-                "Successfully pulled manifest for {}/{}",
-                repository, reference
-            ));
-
-            let content_type = response
-                .headers()
-                .get("Content-Type")
-                .map(|h| h.to_str().unwrap_or("unknown"))
-                .unwrap_or("unknown");
-
-            self.output
-                .detail(&format!("Manifest type: {}", content_type));
-
-            let data = response.bytes().await.map_err(|e| {
-                RegistryError::Network(format!("Failed to read manifest response: {}", e))
-            })?;
-
-            Ok(data.to_vec())
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for manifest pull");
+            let (manifest_data, _digest) = oci_client.pull_manifest(repository, reference).await?;
+            Ok(manifest_data)
         } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-
-            self.output.error(&format!(
-                "Failed to pull manifest: HTTP {} - {}",
-                status, error_text
-            ));
-
-            Err(RegistryError::Registry(format!(
-                "Failed to pull manifest for {}/{} (status {}): {}",
-                repository, reference, status, error_text
-            )))
+            self.output.verbose("Falling back to legacy manifest pull");
+            self.manifest_operations.pull_manifest(repository, reference, token).await
         }
     }
 
@@ -457,140 +281,13 @@ impl RegistryClient {
         digest: &str,
         token: &Option<String>,
     ) -> Result<Vec<u8>> {
-        // 确保摘要格式正确
-        let normalized_digest = if digest.starts_with("sha256:") {
-            digest.to_string()
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for blob pull");
+            oci_client.pull_blob(repository, digest).await
         } else {
-            format!("sha256:{}", digest)
-        };
-
-        self.output.verbose(&format!(
-            "Pulling blob {} from {}",
-            &normalized_digest[..16],
-            repository
-        ));
-
-        let url = format!(
-            "{}/v2/{}/blobs/{}",
-            self.address, repository, normalized_digest
-        );
-
-        // Use token manager for automatic refresh if available
-        if let Some(ref token_manager) = self.token_manager {
-            let repository_clone = repository.to_string();
-            let url_clone = url.clone();
-            let normalized_digest_clone = normalized_digest.clone();
-            let output_clone = self.output.clone();
-            let client_clone = self.client.clone();
-
-            return token_manager.execute_with_retry(|token| {
-                let url = url_clone.clone();
-                let normalized_digest = normalized_digest_clone.clone();
-                let output = output_clone.clone();
-                let client = client_clone.clone();
-                let repository = repository_clone.clone();
-
-                Box::pin(async move {
-                    let mut request = client.get(&url);
-
-                    // 添加授权头（如果提供了 token）
-                    if let Some(token) = token {
-                        request = request.bearer_auth(token);
-                    }
-
-                    let response = request.send().await.map_err(|e| {
-                        output.error(&format!("Failed to pull blob: {}", e));
-                        NetworkErrorHandler::handle_network_error(&e, "blob pull")
-                    })?;
-
-                    if response.status().is_success() {
-                        let content_length = response.content_length().unwrap_or(0);
-
-                        output.success(&format!(
-                            "Successfully pulled blob {} ({}) from {}",
-                            &normalized_digest[..16],
-                            output.format_size(content_length),
-                            repository
-                        ));
-
-                        let data = response.bytes().await.map_err(|e| {
-                            RegistryError::Network(format!("Failed to read blob response: {}", e))
-                        })?;
-
-                        Ok(data.to_vec())
-                    } else {
-                        let status = response.status();
-                        let error_text = response
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Failed to read error response".to_string());
-
-                        // For 401 errors, return a specific error that the token manager can catch
-                        if status == reqwest::StatusCode::UNAUTHORIZED {
-                            return Err(RegistryError::Registry(format!(
-                                "401 Unauthorized: Failed to pull blob {} from {} - token may have expired",
-                                normalized_digest, repository
-                            )));
-                        }
-
-                        output.error(&format!(
-                            "Failed to pull blob: HTTP {} - {}",
-                            status, error_text
-                        ));
-
-                        Err(RegistryError::Registry(format!(
-                            "Failed to pull blob {} from {} (status {}): {}",
-                            normalized_digest, repository, status, error_text
-                        )))
-                    }
-                })
-            }).await;
-        }
-
-        // Fallback to direct request without token manager
-        let mut request = self.client.get(&url);
-
-        // 添加授权头（如果提供了 token）
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to pull blob: {}", e));
-            NetworkErrorHandler::handle_network_error(&e, "blob pull")
-        })?;
-
-        if response.status().is_success() {
-            let content_length = response.content_length().unwrap_or(0);
-
-            self.output.success(&format!(
-                "Successfully pulled blob {} ({}) from {}",
-                &normalized_digest[..16],
-                self.output.format_size(content_length),
-                repository
-            ));
-
-            let data = response.bytes().await.map_err(|e| {
-                RegistryError::Network(format!("Failed to read blob response: {}", e))
-            })?;
-
-            Ok(data.to_vec())
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-
-            self.output.error(&format!(
-                "Failed to pull blob: HTTP {} - {}",
-                status, error_text
-            ));
-
-            Err(RegistryError::Registry(format!(
-                "Failed to pull blob {} from {} (status {}): {}",
-                normalized_digest, repository, status, error_text
-            )))
+            self.output.verbose("Falling back to legacy blob pull");
+            self.blob_operations.pull_blob(repository, digest, token).await
         }
     }
 
@@ -601,127 +298,24 @@ impl RegistryClient {
         digest: &str,
         token: &Option<String>,
     ) -> Result<Vec<u8>> {
-        // 确保摘要格式正确
-        let normalized_digest = if digest.starts_with("sha256:") {
-            digest.to_string()
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            // OCI client is already silent by default
+            oci_client.pull_blob(repository, digest).await
         } else {
-            format!("sha256:{}", digest)
-        };
-
-        self.output.verbose(&format!(
-            "Pulling blob {} from {}",
-            &normalized_digest[..16], repository
-        ));
-
-        let url = format!(
-            "{}/v2/{}/blobs/{}",
-            self.address, repository, normalized_digest
-        );
-
-        let mut request = self.client.get(&url);
-
-        // 如果有认证token，添加到请求头
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to pull blob: {}", e));
-            NetworkErrorHandler::handle_network_error(&e, "blob pull")
-        })?;
-
-        if response.status().is_success() {
-            let data = response.bytes().await.map_err(|e| {
-                RegistryError::Network(format!("Failed to read blob response: {}", e))
-            })?;
-
-            Ok(data.to_vec())
-        } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-
-            self.output.error(&format!(
-                "Failed to pull blob: HTTP {} - {}",
-                status, error_text
-            ));
-
-            Err(RegistryError::Registry(format!(
-                "Failed to pull blob {} from {} (status {}): {}",
-                normalized_digest, repository, status, error_text
-            )))
+            self.blob_operations.pull_blob_silent(repository, digest, token).await
         }
     }
 
     /// 获取仓库中的所有标签列表
     pub async fn list_tags(&self, repository: &str, token: &Option<String>) -> Result<Vec<String>> {
-        self.output
-            .verbose(&format!("Listing tags for repository: {}", repository));
-
-        let url = format!("{}/v2/{}/tags/list", self.address, repository);
-
-        let mut request = self.client.get(&url);
-
-        // 添加授权头（如果提供了 token）
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to list tags: {}", e));
-            NetworkErrorHandler::handle_network_error(&e, "list tags")
-        })?;
-
-        if response.status().is_success() {
-            let data: serde_json::Value = response.json().await.map_err(|e| {
-                RegistryError::Parse(format!("Failed to parse tag list response: {}", e))
-            })?;
-
-            if let Some(tags) = data.get("tags").and_then(|t| t.as_array()) {
-                let tag_list: Vec<String> = tags
-                    .iter()
-                    .filter_map(|t| t.as_str().map(|s| s.to_string()))
-                    .collect();
-
-                self.output.success(&format!(
-                    "Successfully listed {} tags for {}",
-                    tag_list.len(),
-                    repository
-                ));
-
-                Ok(tag_list)
-            } else {
-                self.output
-                    .warning(&format!("Repository {} has no tags", repository));
-                Ok(Vec::new())
-            }
+        // Use OCI client by default if available
+        if let Some(oci_client) = &self.oci_client {
+            self.output.verbose("Using OCI client for tag listing");
+            oci_client.list_tags(repository).await
         } else {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-
-            // 如果返回 404，表示仓库可能不存在或没有标签
-            if status.as_u16() == 404 {
-                self.output.warning(&format!(
-                    "Repository {} not found or has no tags",
-                    repository
-                ));
-                return Ok(Vec::new());
-            }
-
-            self.output.error(&format!(
-                "Failed to list tags: HTTP {} - {}",
-                status, error_text
-            ));
-
-            Err(RegistryError::Registry(format!(
-                "Failed to list tags for {} (status {}): {}",
-                repository, status, error_text
-            )))
+            self.output.verbose("Falling back to legacy tag listing");
+            self.repository_operations.list_tags(repository, token).await
         }
     }
 
@@ -732,45 +326,7 @@ impl RegistryClient {
         reference: &str,
         token: &Option<String>,
     ) -> Result<bool> {
-        self.output.verbose(&format!(
-            "Checking if image {}/{} exists",
-            repository, reference
-        ));
-
-        // 尝试获取镜像清单，只获取头信息
-        let url = format!("{}/v2/{}/manifests/{}", self.address, repository, reference);
-
-        let mut request = self.client.head(&url).header(
-            "Accept",
-            "application/vnd.docker.distribution.manifest.v2+json",
-        );
-
-        // 添加授权头（如果提供了 token）
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request.send().await.map_err(|e| {
-            self.output
-                .error(&format!("Failed to check image existence: {}", e));
-            NetworkErrorHandler::handle_network_error(&e, "image existence check")
-        })?;
-
-        let exists = response.status().is_success();
-
-        if exists {
-            self.output.detail(&format!(
-                "Image {}/{} exists in registry",
-                repository, reference
-            ));
-        } else {
-            self.output.detail(&format!(
-                "Image {}/{} does not exist in registry",
-                repository, reference
-            ));
-        }
-
-        Ok(exists)
+        self.repository_operations.check_image_exists(repository, reference, token).await
     }
 
     /// 从 tar 文件中提取并推送 blob 到 registry
@@ -893,11 +449,105 @@ impl RegistryClient {
             .await
     }
 
-    /// Enable automatic token refresh for long-running operations
-    pub fn with_token_manager(mut self, token_info: Option<crate::registry::auth::TokenInfo>) -> Self {
-        if let Some(info) = token_info {
-            self.token_manager = Some(TokenManager::new(self.auth.clone(), self.output.clone()).with_token_info(Some(info)));
+    /// Enable OCI client functionality
+    pub fn enable_oci_client(&mut self) -> Result<()> {
+        let oci_client = OciClientAdapter::new(self.address.clone(), self.output.clone())?;
+        self.oci_client = Some(oci_client);
+        Ok(())
+    }
+
+    /// Enable OCI client with authentication
+    pub fn enable_oci_client_with_auth(&mut self, auth_config: &AuthConfig) -> Result<()> {
+        let oci_client = OciClientAdapter::with_auth(
+            self.address.clone(),
+            auth_config,
+            self.output.clone(),
+        )?;
+        self.oci_client = Some(oci_client);
+        Ok(())
+    }
+
+    /// Check if OCI client is enabled
+    pub fn has_oci_client(&self) -> bool {
+        self.oci_client.is_some()
+    }
+
+    /// Get OCI client reference if available
+    pub fn oci_client(&self) -> Option<&OciClientAdapter> {
+        self.oci_client.as_ref()
+    }
+}
+
+// Implement OCI Registry Operations trait for RegistryClient
+#[async_trait]
+impl OciRegistryOperations for RegistryClient {
+    async fn oci_pull_manifest(&self, repository: &str, reference: &str) -> Result<(Vec<u8>, String)> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.pull_manifest(repository, reference).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
         }
-        self
+    }
+
+    async fn oci_pull_blob(&self, repository: &str, digest: &str) -> Result<Vec<u8>> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.pull_blob(repository, digest).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
+        }
+    }
+
+    async fn oci_push_blob(&self, repository: &str, data: &[u8], digest: &str) -> Result<String> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.push_blob(repository, data, digest).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
+        }
+    }
+
+    async fn oci_push_manifest(&self, repository: &str, reference: &str, manifest: &[u8]) -> Result<String> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.push_manifest(repository, reference, manifest).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
+        }
+    }
+
+    async fn oci_blob_exists(&self, repository: &str, digest: &str) -> Result<bool> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.blob_exists(repository, digest).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
+        }
+    }
+
+    async fn oci_manifest_exists(&self, repository: &str, reference: &str) -> Result<bool> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.manifest_exists(repository, reference).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
+        }
+    }
+
+    async fn oci_list_tags(&self, repository: &str) -> Result<Vec<String>> {
+        if let Some(oci_client) = &self.oci_client {
+            oci_client.list_tags(repository).await
+        } else {
+            Err(RegistryError::Validation(
+                "OCI client not enabled. Call enable_oci_client() first.".to_string()
+            ))
+        }
     }
 }

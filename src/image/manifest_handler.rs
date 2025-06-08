@@ -122,19 +122,19 @@ impl ManifestHandler {
         self.associate_blob_with_image(repository, reference, config_digest, true, cache)
             .await?;
 
-        // Convert layer digests to LayerInfo for unified pipeline
+        // Convert layer information to LayerInfo for unified pipeline
         let layers: Vec<LayerInfo> = parsed_manifest
-            .layer_digests
+            .layer_info
             .iter()
             .enumerate()
-            .map(|(index, digest)| {
+            .map(|(index, (digest, size))| {
                 LayerInfo {
                     digest: digest.clone(),
-                    size: 0, // Size will be determined during download or estimated
+                    size: *size,
                     tar_path: format!("layer_{}.tar", index), // Placeholder
                     // Default fields for download operations
                     media_type: "application/vnd.docker.image.rootfs.diff.tar.gzip".to_string(),
-                    compressed_size: Some(0),
+                    compressed_size: Some(*size),
                     offset: None,
                 }
             })

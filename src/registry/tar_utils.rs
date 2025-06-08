@@ -365,7 +365,7 @@ impl TarUtils {
 
                 let digest = format!(
                     "sha256:{}",
-                    hex::encode(crate::image::digest::DigestUtils::compute_sha256(&data))
+                    crate::image::digest::DigestUtils::compute_sha256(&data)
                 );
                 return Ok((digest, size));
             }

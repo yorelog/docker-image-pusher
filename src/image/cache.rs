@@ -225,7 +225,7 @@ impl Cache {
         // Verify the blob digest
         let actual_digest = format!(
             "sha256:{}",
-            hex::encode(crate::image::digest::DigestUtils::compute_sha256(data))
+            crate::image::digest::DigestUtils::compute_sha256(data)
         );
         if actual_digest != digest {
             return Err(RegistryError::Validation(format!(
@@ -849,6 +849,162 @@ impl Cache {
 
         Ok(blob_path)
     }
+
+    /// Comprehensive blob verification with detailed logging for debugging
+    pub fn verify_blob_exists_with_details(&self, digest: &str, verbose_output: Option<&crate::logging::Logger>) -> Result<(bool, String)> {
+        let normalized_digest = if digest.starts_with("sha256:") {
+            digest.to_string()
+        } else {
+            format!("sha256:{}", digest)
+        };
+        
+        let blob_path = self.get_blob_path(&normalized_digest);
+        let mut debug_info = Vec::new();
+        
+        debug_info.push(format!("🔍 Verifying blob: {}", &normalized_digest[..23]));
+        debug_info.push(format!("📁 Expected path: {}", blob_path.display()));
+        
+        // Check if file exists
+        if !blob_path.exists() {
+            debug_info.push("❌ File does not exist in cache".to_string());
+            let report = debug_info.join("\n");
+            if let Some(logger) = verbose_output {
+                logger.warning(&report);
+            }
+            return Ok((false, report));
+        }
+        
+        // Get file metadata
+        let metadata = match fs::metadata(&blob_path) {
+            Ok(meta) => {
+                debug_info.push(format!("📊 File size: {} bytes", meta.len()));
+                meta
+            },
+            Err(e) => {
+                debug_info.push(format!("❌ Failed to read file metadata: {}", e));
+                let report = debug_info.join("\n");
+                if let Some(logger) = verbose_output {
+                    logger.warning(&report);
+                }
+                return Ok((false, report));
+            }
+        };
+        
+        let file_size = metadata.len();
+        
+        // Check if file is empty
+        if file_size == 0 {
+            debug_info.push("❌ File is empty (0 bytes)".to_string());
+            let report = debug_info.join("\n");
+            if let Some(logger) = verbose_output {
+                logger.warning(&report);
+            }
+            return Ok((false, report));
+        }
+        
+        // Read file and verify SHA256
+        let file_data = match fs::read(&blob_path) {
+            Ok(data) => {
+                debug_info.push(format!("✅ Successfully read {} bytes from file", data.len()));
+                data
+            },
+            Err(e) => {
+                debug_info.push(format!("❌ Failed to read file content: {}", e));
+                let report = debug_info.join("\n");
+                if let Some(logger) = verbose_output {
+                    logger.warning(&report);
+                }
+                return Ok((false, report));
+            }
+        };
+        
+        // Calculate SHA256 digest
+        let calculated_digest = format!(
+            "sha256:{}",
+            crate::image::digest::DigestUtils::compute_sha256(&file_data)
+        );
+        
+        debug_info.push(format!("🔐 Expected digest: {}", normalized_digest));
+        debug_info.push(format!("🔐 Calculated digest: {}", calculated_digest));
+        
+        let is_valid = calculated_digest == normalized_digest;
+        
+        if is_valid {
+            debug_info.push("✅ Digest verification PASSED".to_string());
+        } else {
+            debug_info.push("❌ Digest verification FAILED - content corrupted or wrong file".to_string());
+        }
+        
+        let report = debug_info.join("\n");
+        if let Some(logger) = verbose_output {
+            if is_valid {
+                logger.detail(&report);
+            } else {
+                logger.warning(&report);
+            }
+        }
+        
+        Ok((is_valid, report))
+    }
+
+    /// Get detailed information about cached image including blob details
+    pub fn get_image_cache_details(&self, repository: &str, reference: &str) -> Result<String> {
+        let cache_key = format!("{}/{}", repository, reference);
+        if let Some(entry) = self.index.get(&cache_key) {
+            let mut details = Vec::new();
+            details.push(format!("📋 Image: {}/{}", repository, reference));
+            details.push(format!("📄 Manifest path: {}", entry.manifest_path.display()));
+            details.push(format!("🔧 Config digest: {}", &entry.config_digest[..23]));
+            details.push(format!("📦 Total blobs: {}", entry.blobs.len()));
+            
+            // Check manifest file
+            if entry.manifest_path.exists() {
+                if let Ok(manifest_data) = fs::read(&entry.manifest_path) {
+                    details.push(format!("✅ Manifest file exists ({} bytes)", manifest_data.len()));
+                } else {
+                    details.push("❌ Manifest file exists but unreadable".to_string());
+                }
+            } else {
+                details.push("❌ Manifest file missing".to_string());
+            }
+            
+            // Check each blob
+            for (i, (digest, blob_info)) in entry.blobs.iter().enumerate() {
+                details.push(format!("\n📦 Blob {}/{}: {}", i + 1, entry.blobs.len(), &digest[..23]));
+                details.push(format!("   📁 Path: {}", blob_info.path.display()));
+                details.push(format!("   📊 Expected size: {} bytes", blob_info.size));
+                details.push(format!("   🏷️  Type: {} (compressed: {})", 
+                    if blob_info.is_config { "config" } else { "layer" }, 
+                    blob_info.compressed
+                ));
+                
+                if blob_info.path.exists() {
+                    if let Ok(metadata) = fs::metadata(&blob_info.path) {
+                        let actual_size = metadata.len();
+                        if actual_size == blob_info.size {
+                            details.push(format!("   ✅ File exists, size matches ({} bytes)", actual_size));
+                        } else {
+                            details.push(format!("   ⚠️  File exists but size mismatch: expected {} bytes, actual {} bytes", 
+                                blob_info.size, actual_size));
+                        }
+                    } else {
+                        details.push("   ❌ File exists but metadata unreadable".to_string());
+                    }
+                } else {
+                    details.push("   ❌ File missing from cache".to_string());
+                }
+            }
+            
+            Ok(details.join("\n"))
+        } else {
+            Err(RegistryError::NotFound(format!(
+                "Image {}/{} not found in cache index",
+                repository, reference
+            )))
+        }
+    }
+
+    // ...existing code...
 }
 
 #[derive(Debug)]

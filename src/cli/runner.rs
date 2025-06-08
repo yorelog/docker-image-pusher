@@ -43,8 +43,19 @@ impl Runner {
 
             let token = token_info.as_ref().map(|info| info.token.clone());
             
+            // Create token manager for automatic refresh
+            let token_manager = if token_info.is_some() {
+                let token_manager = crate::registry::token_manager::TokenManager::new(
+                    client.auth.clone(),
+                    self.output.clone(),
+                ).with_token_info(token_info);
+                Some(token_manager)
+            } else {
+                None
+            };
+            
             // Create a client with token manager enabled
-            let enhanced_client = client.clone().with_token_manager(token_info);
+            let enhanced_client = client.clone().with_token_manager(token_manager);
             
             if token.is_some() {
                 self.output.success(&format!(
@@ -206,11 +217,19 @@ impl Runner {
                     }
                 } else {
                     if let Some((source_repo, source_ref)) = push_args.parse_source_repository() {
-                        if image_manager.is_image_cached(&source_repo, &source_ref)? {
+                        // Apply the same repository name normalization that's used during caching
+                        // to ensure we look up the image with the correct cache key
+                        let normalized_source_repo = if source_repo.contains('/') {
+                            source_repo.clone()
+                        } else {
+                            format!("library/{}", source_repo)
+                        };
+                        
+                        if image_manager.is_image_cached(&normalized_source_repo, &source_ref)? {
                             // Use the new method that supports separate source and target coordinates
                             image_manager
                                 .execute_push_from_cache_with_source(
-                                    &source_repo,
+                                    &normalized_source_repo,
                                     &source_ref,
                                     &parsed_target.repository,
                                     &parsed_target.tag,

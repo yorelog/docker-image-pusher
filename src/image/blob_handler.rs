@@ -7,19 +7,41 @@ use crate::common::Validatable;
 use crate::error::{RegistryError, Result};
 use crate::image::{cache::BlobInfo, digest::DigestUtils, Cache};
 use crate::logging::Logger;
-use crate::registry::RegistryClient;
+use crate::registry::{RegistryClient, PipelineConfig};
+use std::sync::Arc;
+
+/// Blob upload task with embedded data to avoid cache cloning
+#[derive(Debug)]
+struct BlobUploadTaskWithData {
+    digest: String,
+    size: u64,
+    is_config: bool,
+    priority: u64,
+    data: Vec<u8>,
+}
 
 /// Blob handler for processing Docker/OCI blobs
 pub struct BlobHandler {
     logger: Logger,
+    pipeline_config: PipelineConfig,
 }
 
 impl BlobHandler {
     pub fn new(logger: Logger) -> Self {
-        Self { logger }
+        Self { 
+            logger,
+            pipeline_config: PipelineConfig::default(),
+        }
     }
 
-    /// Push all blobs to registry with enhanced verification
+    pub fn with_config(logger: Logger, pipeline_config: PipelineConfig) -> Self {
+        Self {
+            logger,
+            pipeline_config,
+        }
+    }
+
+    /// Push all blobs to registry with enhanced verification using UnifiedPipeline
     pub async fn push_blobs_to_registry(
         &self,
         client: &RegistryClient,
@@ -28,15 +50,21 @@ impl BlobHandler {
         token: &Option<String>,
         cache: &Cache,
     ) -> Result<()> {
-        self.logger.step(&format!("Pushing {} blobs with enhanced progress tracking", blobs.len()));
+        if blobs.is_empty() {
+            return Ok(());
+        }
 
-        // Display pipeline info for blob uploads
+        // Use enhanced blob upload process with pre-loaded data
+        self.logger.step(&format!("Pushing {} blobs using enhanced concurrent upload", blobs.len()));
+
+        // Display initialization  
         self.logger.info(&format!(
-            "Starting enhanced progress monitoring for {} blobs...",
+            "🚀 Initializing enhanced upload pipeline for {} blob uploads with improved concurrency...",
             blobs.len()
         ));
 
-        // Note: For cache-based pushes, we'll use basic blob upload with enhanced verification
+        // Validate all blobs in cache and prepare upload tasks with blob data
+        let mut upload_tasks = Vec::new();
         for blob in blobs {
             // 先验证blob在缓存中的完整性
             if !cache.has_blob_with_verification(&blob.digest, blob.is_config) {
@@ -46,7 +74,7 @@ impl BlobHandler {
                 });
             }
 
-            // 读取blob数据
+            // 读取blob数据进行验证
             let blob_data = cache.get_blob(&blob.digest)?;
             
             // 对于config blob或小文件，进行额外的SHA256验证
@@ -64,15 +92,89 @@ impl BlobHandler {
             }
 
             self.logger.verbose(&format!(
-                "Uploading blob {} ({}) - verified integrity",
+                "✅ [Unified Pipeline] Blob {} ({}) verified for upload",
                 &blob.digest[..16],
                 self.format_size(blob.size)
             ));
 
-            let _ = client
-                .upload_blob_with_token(&blob_data, &blob.digest, repository, token)
-                .await?;
+            // Use BlobHandler's own priority calculation method instead of UnifiedPipeline
+            let priority = self.calculate_blob_priority(blob.size, blob.is_config);
+
+            // Create upload task with blob data pre-loaded to avoid cache cloning
+            upload_tasks.push(BlobUploadTaskWithData {
+                digest: blob.digest.clone(),
+                size: blob.size,
+                is_config: blob.is_config,
+                priority,
+                data: blob_data,
+            });
         }
+
+        // Execute concurrent blob uploads using semaphore-based concurrency control
+        self.logger.info(&format!(
+            "Executing {} blob uploads with {} concurrent workers",
+            upload_tasks.len(),
+            self.pipeline_config.max_concurrent
+        ));
+
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(self.pipeline_config.max_concurrent));
+        let client_arc = std::sync::Arc::new(client.clone());
+        let logger_arc = std::sync::Arc::new(self.logger.clone());
+        let repository_arc = std::sync::Arc::new(repository.to_string());
+        let token_arc = std::sync::Arc::new(token.clone());
+        
+        let start_time = std::time::Instant::now();
+        let total_size: u64 = upload_tasks.iter().map(|t| t.size).sum();
+
+        // Sort tasks by priority (small blobs first, config blobs highest priority)
+        let mut sorted_tasks = upload_tasks;
+        sorted_tasks.sort_by_key(|task| task.priority);
+
+        // Create concurrent upload futures
+        let upload_futures: Vec<_> = sorted_tasks
+            .into_iter()
+            .enumerate()
+            .map(|(index, task)| {
+                let semaphore = std::sync::Arc::clone(&semaphore);
+                let client = std::sync::Arc::clone(&client_arc);
+                let logger = std::sync::Arc::clone(&logger_arc);
+                let repository = std::sync::Arc::clone(&repository_arc);
+                let token = std::sync::Arc::clone(&token_arc);
+
+                tokio::spawn(async move {
+                    Self::execute_blob_upload_with_data(
+                        task, index, semaphore, client, logger, repository, token,
+                    )
+                    .await
+                })
+            })
+            .collect();
+
+        // Wait for all uploads to complete
+        let results = futures::future::try_join_all(upload_futures)
+            .await
+            .map_err(|e| RegistryError::Upload(format!("Blob upload task failed: {}", e)))?;
+
+        // Check for upload failures
+        for result in results {
+            if let Err(e) = result {
+                return Err(e);
+            }
+        }
+
+        let elapsed = start_time.elapsed();
+        let avg_speed = if elapsed.as_secs() > 0 {
+            total_size / elapsed.as_secs()
+        } else {
+            total_size
+        };
+
+        self.logger.success(&format!(
+            "✅ Unified Pipeline blob upload completed successfully in {} (avg speed: {}/s)",
+            self.logger.format_duration(elapsed),
+            self.logger.format_size(avg_speed)
+        ));
+        
         Ok(())
     }
 
@@ -181,6 +283,69 @@ impl BlobHandler {
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    /// Calculate blob priority for upload scheduling
+    fn calculate_blob_priority(&self, size: u64, is_config: bool) -> u64 {
+        if is_config {
+            // Config blobs get highest priority (lowest number)
+            0
+        } else if size <= self.pipeline_config.small_blob_threshold {
+            // Small blobs get high priority
+            size
+        } else if size <= self.pipeline_config.large_layer_threshold {
+            // Medium blobs get medium priority
+            self.pipeline_config.small_blob_threshold + size
+        } else {
+            // Large blobs get lowest priority (highest numbers)
+            self.pipeline_config.large_layer_threshold + size
+        }
+    }
+
+    /// Execute a single blob upload with pre-loaded data (avoids cache cloning)
+    async fn execute_blob_upload_with_data(
+        task: BlobUploadTaskWithData,
+        index: usize,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        client: Arc<RegistryClient>,
+        logger: Arc<Logger>,
+        repository: Arc<String>,
+        token: Arc<Option<String>>,
+    ) -> Result<()> {
+        // Acquire semaphore permit for concurrency control
+        let _permit = semaphore.acquire().await
+            .map_err(|e| RegistryError::Upload(format!("Failed to acquire semaphore: {}", e)))?;
+
+        let start_time = std::time::Instant::now();
+        
+        logger.detail(&format!(
+            "Upload task {}: Processing blob {} ({}) - priority {}",
+            index + 1,
+            &task.digest[..16],
+            crate::common::FormatUtils::format_bytes(task.size),
+            task.priority
+        ));
+
+        // Upload blob using the unified token-aware method with pre-loaded data
+        client
+            .upload_blob_with_token(&task.data, &task.digest, repository.as_ref(), token.as_ref())
+            .await?;
+
+        let elapsed = start_time.elapsed();
+        let speed = if elapsed.as_secs() > 0 {
+            task.size / elapsed.as_secs()
+        } else {
+            task.size
+        };
+
+        logger.success(&format!(
+            "✅ Blob {} uploaded in {} ({}/s)",
+            &task.digest[..16],
+            logger.format_duration(elapsed),
+            logger.format_size(speed)
+        ));
+
         Ok(())
     }
 

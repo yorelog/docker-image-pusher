@@ -38,7 +38,7 @@ impl ImageManager {
 
         // Initialize specialized handlers with correct constructors
         let manifest_handler = ManifestHandler::new(output.clone(), pipeline_config.clone());
-        let blob_handler = BlobHandler::new(output.clone());
+        let blob_handler = BlobHandler::with_config(output.clone(), pipeline_config.clone());
         let tar_handler = TarHandler::new(output.clone(), pipeline_config.clone(), true);
         let cache_manager = CacheManager::new(cache2, output.clone());
 
@@ -68,7 +68,7 @@ impl ImageManager {
 
         // Initialize specialized handlers with correct constructors
         let manifest_handler = ManifestHandler::new(output.clone(), pipeline_config.clone());
-        let blob_handler = BlobHandler::new(output.clone());
+        let blob_handler = BlobHandler::with_config(output.clone(), pipeline_config.clone());
         let tar_handler = TarHandler::new(output.clone(), pipeline_config.clone(), use_optimized_upload);
         let cache_manager = CacheManager::new(cache2, output.clone());
 
@@ -232,7 +232,18 @@ impl ImageManager {
         reference: &str,
         token: Option<&str>,
     ) -> Result<()> {
-        self.push_from_cache_with_source(client, repository, reference, repository, reference, token).await
+        // Apply the same repository name normalization that was used during caching
+        // to ensure we look up the image with the correct cache key
+        let normalized_repository = self.normalize_repository_name(repository);
+        
+        self.push_from_cache_with_source(
+            client, 
+            &normalized_repository, 
+            reference, 
+            repository, 
+            reference, 
+            token
+        ).await
     }
 
     /// Push from cache to registry with separate source and target coordinates
@@ -255,11 +266,95 @@ impl ImageManager {
 
         // 验证缓存完整性 - 使用源镜像坐标
         self.validate_cache_completeness(source_repository, source_reference)?;
+        
+        // 显示缓存详细信息用于调试
+        if let Ok(cache_details) = self.cache.get_image_cache_details(source_repository, source_reference) {
+            self.output.detail(&format!("📋 Cache details for {}/{}:\n{}", 
+                source_repository, source_reference, cache_details));
+        }
 
         // 推送所有blobs - 使用源镜像坐标获取blobs
         let blobs = self.cache.get_image_blobs(source_repository, source_reference)?;
+        
+        // 验证每个blob在本地缓存中的真实性和完整性
+        self.output.info(&format!("🔍 Verifying {} blobs in local cache before upload...", blobs.len()));
+        for (i, blob) in blobs.iter().enumerate() {
+            self.output.detail(&format!("Verifying blob {}/{}: {}", i + 1, blobs.len(), &blob.digest[..16]));
+            
+            let (is_valid, report) = self.cache.verify_blob_exists_with_details(&blob.digest, Some(&self.output))?;
+            if !is_valid {
+                return Err(RegistryError::Cache {
+                    message: format!(
+                        "Blob {} failed local cache verification before upload. Report:\n{}",
+                        &blob.digest[..16], report
+                    ),
+                    path: Some(blob.path.clone()),
+                });
+            }
+            self.output.verbose(&format!("✅ Local cache verification passed for {}", &blob.digest[..16]));
+        }
+        self.output.success("✅ All blobs verified in local cache");
+        
         self.push_blobs_to_registry(client, target_repository, &blobs, &token)
             .await?;
+
+        // 验证所有blob都已成功上传到registry
+        self.output.info("🔍 Verifying all blobs are present in registry before uploading manifest...");
+        
+        // Add a longer delay to account for registry consistency (阿里云Registry需要更多时间处理)
+        tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+        
+        for blob in &blobs {
+            // Enhanced retry mechanism with exponential backoff for blob existence check
+            let mut retries = 8; // Increase retry count
+            let mut exists = false;
+            let base_delay = 1000; // Start with 1 second
+            
+            while retries > 0 && !exists {
+                exists = client.check_blob_exists_with_token(&blob.digest, target_repository, &token).await?;
+                if !exists {
+                    retries -= 1;
+                    if retries > 0 {
+                        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, etc.
+                        let delay = base_delay * (2_u64.pow(8 - retries as u32 - 1));
+                        self.output.verbose(&format!(
+                            "Blob {} not yet available in registry, retrying in {}s... ({} attempts left)",
+                            &blob.digest[..16], delay / 1000, retries
+                        ));
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    }
+                } else {
+                    self.output.verbose(&format!(
+                        "✅ Blob {} verified in registry after upload",
+                        &blob.digest[..16]
+                    ));
+                    break;
+                }
+            }
+            
+            if !exists {
+                // Try one final verification with a longer timeout
+                self.output.warning(&format!(
+                    "Final verification attempt for blob {} after extended wait...",
+                    &blob.digest[..16]
+                ));
+                tokio::time::sleep(tokio::time::Duration::from_millis(10000)).await; // Wait 10 seconds
+                exists = client.check_blob_exists_with_token(&blob.digest, target_repository, &token).await?;
+                
+                if !exists {
+                    return Err(RegistryError::Upload(format!(
+                        "Blob {} not found in remote registry after upload and extended verification (cached locally but registry verification failed) - this may indicate a registry consistency issue or network problem",
+                        &blob.digest[..16]
+                    )));
+                } else {
+                    self.output.success(&format!(
+                        "✅ Blob {} verified in registry after extended wait",
+                        &blob.digest[..16]
+                    ));
+                }
+            }
+        }
+        self.output.success("✅ All blobs verified present in registry");
 
         // 推送manifest - 使用源镜像坐标获取manifest，但推送到目标坐标
         self.push_manifest_to_registry_with_source(client, source_repository, source_reference, target_repository, target_reference, &token)
@@ -725,19 +820,19 @@ impl ImageManager {
         self.associate_blob_with_image(repository, reference, config_digest, true)
             .await?;
 
-        // Convert layer digests to LayerInfo for unified pipeline
+        // Convert layer information to LayerInfo for unified pipeline
         let layers: Vec<crate::image::parser::LayerInfo> = parsed_manifest
-            .layer_digests
+            .layer_info
             .iter()
             .enumerate()
-            .map(|(index, digest)| {
+            .map(|(index, (digest, size))| {
                 crate::image::parser::LayerInfo {
                     digest: digest.clone(),
-                    size: 0, // Size will be determined during download or estimated
+                    size: *size,
                     tar_path: format!("layer_{}.tar", index), // Placeholder
                     // Default fields for download operations
                     media_type: "application/vnd.docker.image.rootfs.diff.tar.gzip".to_string(),
-                    compressed_size: Some(0),
+                    compressed_size: Some(*size),
                     offset: None,
                 }
             })
@@ -771,6 +866,26 @@ impl ImageManager {
     /// 获取Logger引用
     pub fn get_logger(&self) -> &Logger {
         &self.output
+    }
+
+    /// Normalize repository name for cache lookup
+    /// This applies the same logic used during pull operations to ensure
+    /// that cache lookups use the correct normalized repository name
+    fn normalize_repository_name(&self, repository: &str) -> String {
+        // Check if this looks like a Docker Hub single-name repository
+        // (no registry prefix, no namespace)
+        let parts: Vec<&str> = repository.split('/').collect();
+        
+        match parts.len() {
+            1 => {
+                // Single name like "nginx" -> "library/nginx" for Docker Hub
+                format!("library/{}", repository)
+            }
+            _ => {
+                // Already has namespace or registry, use as-is
+                repository.to_string()
+            }
+        }
     }
 }
 

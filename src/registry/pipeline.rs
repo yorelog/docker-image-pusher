@@ -430,16 +430,83 @@ impl UnifiedPipeline {
         Ok(())
     }
 
-    /// Process download operations (placeholder - implementation moved to separate modules)
+    /// Process download operations with actual implementation
     pub async fn process_downloads(
         &self,
-        _layers: &[crate::image::parser::LayerInfo],
-        _repository: &str,
-        _token: &Option<String>,
-        _client: Arc<crate::registry::RegistryClient>,
-        _cache: &mut crate::image::cache::Cache,
+        layers: &[crate::image::parser::LayerInfo],
+        repository: &str,
+        token: &Option<String>,
+        client: Arc<crate::registry::RegistryClient>,
+        cache: &mut crate::image::cache::Cache,
     ) -> Result<()> {
-        self.logger.info("Unified download pipeline - implementation delegated to specialized modules");
+        if layers.is_empty() {
+            return Ok(());
+        }
+
+        self.logger.section("Unified Pipeline Download");
+        self.logger.info(&format!(
+            "Processing {} layers with priority-based scheduling",
+            layers.len()
+        ));
+
+        // Filter out already cached blobs
+        let mut layers_to_download = Vec::new();
+        for layer in layers {
+            if !cache.has_blob(&layer.digest) {
+                layers_to_download.push(layer);
+                self.logger.detail(&format!(
+                    "Queued for download: {} ({})",
+                    &layer.digest[..16],
+                    self.logger.format_size(layer.size)
+                ));
+            } else {
+                self.logger.detail(&format!(
+                    "Skipping cached blob {} ({})",
+                    &layer.digest[..16],
+                    self.logger.format_size(layer.size)
+                ));
+            }
+        }
+
+        if layers_to_download.is_empty() {
+            self.logger.success("All layers already cached");
+            return Ok(());
+        }
+
+        let download_count = layers_to_download.len();
+        self.logger.info(&format!(
+            "Download queue: {} new layers (skipped {} cached)",
+            download_count,
+            layers.len() - download_count
+        ));
+
+        // Download blobs sequentially for now (can be made concurrent later)
+        for layer in &layers_to_download {
+            self.logger.detail(&format!(
+                "Downloading blob {} ({}) from registry",
+                &layer.digest[..16],
+                self.logger.format_size(layer.size)
+            ));
+
+            // Download blob from registry
+            let data = client
+                .pull_blob(repository, &layer.digest, token)
+                .await?;
+
+            // Add blob to cache
+            cache.add_blob(&layer.digest, &data, false, true)?;
+
+            self.logger.success(&format!(
+                "Blob {} downloaded and cached successfully",
+                &layer.digest[..16]
+            ));
+        }
+
+        self.logger.success(&format!(
+            "All {} layers downloaded and cached successfully",
+            download_count
+        ));
+
         Ok(())
     }
 

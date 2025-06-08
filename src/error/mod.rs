@@ -33,6 +33,8 @@ pub enum RegistryError {
     },
     /// Resource not found
     NotFound(String),
+    /// Feature not implemented
+    NotImplemented(String),
 }
 
 impl fmt::Display for RegistryError {
@@ -55,6 +57,7 @@ impl fmt::Display for RegistryError {
                 }
             }
             RegistryError::NotFound(msg) => write!(f, "Not found: {}", msg),
+            RegistryError::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
         }
     }
 }

@@ -15,7 +15,7 @@ pub use cli::config::AuthConfig;
 pub use concurrency::{AdaptiveConcurrencyManager, ConcurrencyConfig, ConcurrencyStrategy, PerformanceMonitor};
 pub use error::{RegistryError, Result};
 pub use logging::Logger;
-pub use registry::{RegistryClient, RegistryClientBuilder};
+pub use registry::{RegistryClient, RegistryClientBuilder, OciClientAdapter, OciClientBuilder, OciRegistryOperations};
 
 /// Create upload configuration from CLI arguments
 pub fn create_upload_config_from_args(

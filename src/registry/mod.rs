@@ -12,17 +12,22 @@
 //! concurrency module for better feature richness and maintainability.
 
 // Core registry functionality
+pub mod adapter;
 pub mod auth;
 pub mod client;
+pub mod oci_client;
+pub mod operations;
 pub mod pipeline;
 pub mod stats;
 pub mod tar;
 pub mod tar_utils;
 pub mod token_manager;
+pub mod transport;
 
 // Core registry exports
 pub use auth::{Auth, TokenInfo};
 pub use client::{RegistryClient, RegistryClientBuilder};
+pub use oci_client::{OciClientAdapter, OciClientBuilder, OciRegistryOperations};
 pub use pipeline::{
     EnhancedProgressTracker, TaskOperation, PipelineConfig, 
     EnhancedConcurrencyStats, PriorityQueueStatus, NetworkSpeedStats,
@@ -33,3 +38,4 @@ pub use pipeline::{
 pub use stats::{UploadStats, LayerUploadStats, LayerStatus, ProgressReporter, SessionStats};
 pub use tar_utils::TarUtils;
 pub use token_manager::TokenManager;
+pub use adapter::{RegistryClientAdapter, UnifiedRegistryClient};

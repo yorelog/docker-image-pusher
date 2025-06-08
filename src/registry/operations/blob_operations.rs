@@ -198,6 +198,9 @@ impl BlobOperations {
             format!("sha256:{}", digest)
         };
 
+        // Keep a copy for later use
+        let normalized_digest_final = normalized_digest.clone();
+
         self.output.info(&format!(
             "Uploading blob {} ({}) to {}",
             &normalized_digest[..16],
@@ -216,33 +219,83 @@ impl BlobOperations {
         }
 
         // Use staged upload (Docker Registry v2 pattern) - more reliable
-        // Step 1: Start upload session
+        // Step 1: Start upload session with token retry capability
         let upload_url = format!("{}/v2/{}/blobs/uploads/", self.address, repository);
         
         self.output.detail(&format!("Starting blob upload session at: {}", upload_url));
         
-        let mut request = self.client.post(&upload_url);
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
+        let (response, used_token) = if let Some(ref token_manager) = self.token_manager {
+            let upload_url_clone = upload_url.clone();
+            let output_clone = self.output.clone();
+            let client_clone = self.client.clone();
 
-        let response = request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to start upload session: {}", e));
-            RegistryError::Network(e.to_string())
-        })?;
-        
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-            self.output.error(&format!("Upload session failed with status {}: {}", status, error_text));
-            return Err(RegistryError::Upload(format!(
-                "Failed to start blob upload session (status {}): {}",
-                status, error_text
-            )));
-        }
+            let result = token_manager.execute_with_retry(|token| {
+                let upload_url = upload_url_clone.clone();
+                let output = output_clone.clone();
+                let client = client_clone.clone();
+
+                Box::pin(async move {
+                    let token_for_request = token.clone();
+                    let mut request = client.post(&upload_url);
+                    if let Some(token_str) = token_for_request {
+                        request = request.bearer_auth(token_str);
+                    }
+
+                    let response = request.send().await.map_err(|e| {
+                        output.error(&format!("Failed to start upload session: {}", e));
+                        RegistryError::Network(e.to_string())
+                    })?;
+                    
+                    let status = response.status();
+                    if status == 401 {
+                        // Return 401 error for token manager to catch and retry
+                        return Err(RegistryError::Registry(format!(
+                            "401 Unauthorized: Failed to start upload session - token may have expired"
+                        )));
+                    }
+
+                    if !status.is_success() {
+                        let error_text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Failed to read error response".to_string());
+                        output.error(&format!("Upload session failed with status {}: {}", status, error_text));
+                        return Err(RegistryError::Upload(format!(
+                            "Failed to start blob upload session (status {}): {}",
+                            status, error_text
+                        )));
+                    }
+
+                    Ok((response, token))
+                })
+            }).await?;
+            result
+        } else {
+            let mut request = self.client.post(&upload_url);
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+
+            let response = request.send().await.map_err(|e| {
+                self.output.error(&format!("Failed to start upload session: {}", e));
+                RegistryError::Network(e.to_string())
+            })?;
+            
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Failed to read error response".to_string());
+                self.output.error(&format!("Upload session failed with status {}: {}", status, error_text));
+                return Err(RegistryError::Upload(format!(
+                    "Failed to start blob upload session (status {}): {}",
+                    status, error_text
+                )));
+            }
+
+            (response, token.clone())
+        };
 
         // Get upload location URL from Location header
         let location = response
@@ -280,52 +333,130 @@ impl BlobOperations {
         
         self.output.detail(&format!("Uploading {} bytes to: {}", data.len(), final_url));
         
-        let mut upload_request = self
-            .client
-            .put(&final_url)
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Length", data.len().to_string())
-            .body(data.to_vec());
+        // Use token manager for upload operation as well
+        let upload_result = if let Some(ref token_manager) = self.token_manager {
+            let final_url_clone = final_url.clone();
+            let data_clone = data.to_vec();
+            let normalized_digest_clone = normalized_digest.clone();
+            let output_clone = self.output.clone();
+            let client_clone = self.client.clone();
 
-        if let Some(token) = token {
-            upload_request = upload_request.bearer_auth(token);
-        }
+            token_manager.execute_with_retry(|token| {
+                let final_url = final_url_clone.clone();
+                let data = data_clone.clone();
+                let normalized_digest = normalized_digest_clone.clone();
+                let output = output_clone.clone();
+                let client = client_clone.clone();
 
-        let upload_response = upload_request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to upload blob data: {}", e));
-            RegistryError::Network(e.to_string())
-        })?;
+                Box::pin(async move {
+                    let mut upload_request = client
+                        .put(&final_url)
+                        .header("Content-Type", "application/octet-stream")
+                        .header("Content-Length", data.len().to_string())
+                        .body(data);
 
-        if upload_response.status().is_success() {
-            self.output
-                .success(&format!("Blob {} uploaded successfully", &normalized_digest[..16]));
-            
-            // Add a small delay to help with registry consistency
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
-            Ok(normalized_digest)
+                    if let Some(token) = token {
+                        upload_request = upload_request.bearer_auth(token);
+                    }
+
+                    let upload_response = upload_request.send().await.map_err(|e| {
+                        output.error(&format!("Failed to upload blob data: {}", e));
+                        RegistryError::Network(e.to_string())
+                    })?;
+
+                    let status = upload_response.status();
+                    if status == 401 {
+                        // Return 401 error for token manager to catch and retry
+                        return Err(RegistryError::Registry(format!(
+                            "401 Unauthorized: Failed to upload blob - token may have expired"
+                        )));
+                    }
+
+                    if status.is_success() {
+                        output.success(&format!("Blob {} uploaded successfully", &normalized_digest[..16]));
+                        // Add a small delay to help with registry consistency
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        Ok(normalized_digest)
+                    } else {
+                        let error_text = upload_response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Failed to read error response".to_string());
+                        
+                        output.warning(&format!(
+                            "Monolithic upload failed (status {}): {}",
+                            status, error_text
+                        ));
+                        
+                        // Check if this is a specific error that should trigger chunked upload
+                        if status == 404 && error_text.contains("BLOB_UPLOAD_INVALID") {
+                            // Return special error to trigger chunked upload fallback
+                            Err(RegistryError::Upload("CHUNKED_FALLBACK".to_string()))
+                        } else {
+                            Err(RegistryError::Upload(format!(
+                                "Blob upload failed (status {}): {}",
+                                status, error_text
+                            )))
+                        }
+                    }
+                })
+            }).await
         } else {
-            let status = upload_response.status();
-            let error_text = upload_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error response".to_string());
-            
-            self.output.warning(&format!(
-                "Monolithic upload failed (status {}): {}", 
-                status, error_text
-            ));
-            
-            // If monolithic upload fails, try the chunked upload approach
-            if status == 404 && error_text.contains("BLOB_UPLOAD_INVALID") {
-                self.output.info("Trying chunked upload approach...");
-                self.upload_blob_chunked(data, &normalized_digest, repository, token).await
-            } else {
-                Err(RegistryError::Upload(format!(
-                    "Blob upload failed (status {}): {}",
-                    status, error_text
-                )))
+            let mut upload_request = self
+                .client
+                .put(&final_url)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", data.len().to_string())
+                .body(data.to_vec());
+
+            if let Some(token_str) = &used_token {
+                upload_request = upload_request.bearer_auth(token_str);
             }
+
+            let upload_response = upload_request.send().await.map_err(|e| {
+                self.output.error(&format!("Failed to upload blob data: {}", e));
+                RegistryError::Network(e.to_string())
+            })?;
+
+            if upload_response.status().is_success() {
+                self.output
+                    .success(&format!("Blob {} uploaded successfully", &normalized_digest[..16]));
+                
+                // Add a small delay to help with registry consistency
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                
+                Ok(normalized_digest)
+            } else {
+                let status = upload_response.status();
+                let error_text = upload_response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Failed to read error response".to_string());
+                
+                self.output.warning(&format!(
+                    "Monolithic upload failed (status {}): {}", 
+                    status, error_text
+                ));
+                
+                // If monolithic upload fails, check if we should try chunked upload approach
+                if status == 404 && error_text.contains("BLOB_UPLOAD_INVALID") {
+                    Err(RegistryError::Upload("CHUNKED_FALLBACK".to_string()))
+                } else {
+                    Err(RegistryError::Upload(format!(
+                        "Blob upload failed (status {}): {}",
+                        status, error_text
+                    )))
+                }
+            }
+        };
+
+        match upload_result {
+            Ok(digest) => Ok(digest),
+            Err(RegistryError::Upload(ref msg)) if msg == "CHUNKED_FALLBACK" => {
+                self.output.info("Trying chunked upload approach...");
+                self.upload_blob_chunked(data, &normalized_digest_final, repository, &used_token).await
+            },
+            Err(e) => Err(e),
         }
     }
 
@@ -339,21 +470,81 @@ impl BlobOperations {
     ) -> Result<String> {
         self.output.detail("Starting chunked upload session...");
         
+        // Use token manager for chunked upload if available
+        if let Some(ref token_manager) = self.token_manager {
+            let data_clone = data.to_vec();
+            let digest_clone = digest.to_string();
+            let repository_clone = repository.to_string();
+            let output_clone = self.output.clone();
+            let client_clone = self.client.clone();
+            let address_clone = self.address.clone();
+
+            return token_manager.execute_with_retry(|token| {
+                let data = data_clone.clone();
+                let digest = digest_clone.clone();
+                let repository = repository_clone.clone();
+                let output = output_clone.clone();
+                let client = client_clone.clone();
+                let address = address_clone.clone();
+
+                Box::pin(async move {
+                    Self::perform_chunked_upload(
+                        &client,
+                        &address,
+                        &output,
+                        &data,
+                        &digest,
+                        &repository,
+                        &token,
+                    ).await
+                })
+            }).await;
+        }
+
+        // Fallback to direct chunked upload without token manager
+        Self::perform_chunked_upload(
+            &self.client,
+            &self.address,
+            &self.output,
+            data,
+            digest,
+            repository,
+            token,
+        ).await
+    }
+
+    /// Internal implementation of chunked upload that can be retried with token refresh
+    async fn perform_chunked_upload(
+        client: &reqwest::Client,
+        address: &str,
+        output: &Logger,
+        data: &[u8],
+        digest: &str,
+        repository: &str,
+        token: &Option<String>,
+    ) -> Result<String> {
         // Step 1: Start upload session
-        let upload_url = format!("{}/v2/{}/blobs/uploads/", self.address, repository);
+        let upload_url = format!("{}/v2/{}/blobs/uploads/", address, repository);
         
-        let mut request = self.client.post(&upload_url);
+        let mut request = client.post(&upload_url);
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
 
         let response = request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to start chunked upload session: {}", e));
+            output.error(&format!("Failed to start chunked upload session: {}", e));
             RegistryError::Network(e.to_string())
         })?;
         
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        if status == 401 {
+            // Return 401 error for token manager to catch and retry
+            return Err(RegistryError::Registry(format!(
+                "401 Unauthorized: Failed to start chunked upload session - token may have expired"
+            )));
+        }
+        
+        if !status.is_success() {
             let error_text = response
                 .text()
                 .await
@@ -376,22 +567,21 @@ impl BlobOperations {
             location.to_string()
         } else {
             if location.starts_with('/') {
-                format!("{}{}", self.address, location)
+                format!("{}{}", address, location)
             } else {
-                format!("{}/v2/{}/blobs/uploads/{}", self.address, repository, location)
+                format!("{}/v2/{}/blobs/uploads/{}", address, repository, location)
             }
         };
 
-        self.output.detail(&format!("Chunked upload location: {}", full_location));
+        output.detail(&format!("Chunked upload location: {}", full_location));
 
         // Step 2: For small blobs, try single chunk upload (faster and more reliable)
         if data.len() <= 1024 * 1024 { // 1MB or less, use single chunk
-            self.output.detail("Using single-chunk upload for small blob");
+            output.detail("Using single-chunk upload for small blob");
             
             let final_url = format!("{}?digest={}", full_location, digest);
             
-            let mut upload_request = self
-                .client
+            let mut upload_request = client
                 .put(&final_url)
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", data.len().to_string())
@@ -402,22 +592,28 @@ impl BlobOperations {
             }
 
             let upload_response = upload_request.send().await.map_err(|e| {
-                self.output.error(&format!("Failed to upload single chunk: {}", e));
+                output.error(&format!("Failed to upload single chunk: {}", e));
                 RegistryError::Network(e.to_string())
             })?;
 
-            if upload_response.status().is_success() {
-                self.output
-                    .success(&format!("Blob {} uploaded successfully via single chunk", &digest[..16]));
+            let status = upload_response.status();
+            if status == 401 {
+                // Return 401 error for token manager to catch and retry
+                return Err(RegistryError::Registry(format!(
+                    "401 Unauthorized: Failed to upload single chunk - token may have expired"
+                )));
+            }
+
+            if status.is_success() {
+                output.success(&format!("Blob {} uploaded successfully via single chunk", &digest[..16]));
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 return Ok(digest.to_string());
             } else {
-                let status = upload_response.status();
                 let error_text = upload_response
                     .text()
                     .await
                     .unwrap_or_else(|_| "Failed to read error response".to_string());
-                self.output.warning(&format!(
+                output.warning(&format!(
                     "Single chunk upload failed (status {}): {}, trying multi-chunk approach", 
                     status, error_text
                 ));
@@ -425,7 +621,7 @@ impl BlobOperations {
         }
 
         // Step 3: Multi-chunk upload for larger blobs
-        self.output.detail("Using multi-chunk upload for large blob");
+        output.detail("Using multi-chunk upload for large blob");
         let chunk_size = 1024 * 1024; // 1MB chunks
         let mut uploaded = 0;
         let mut current_location = full_location;
@@ -437,14 +633,13 @@ impl BlobOperations {
             let chunk = &data[uploaded..end];
             let is_final_chunk = end == data.len();
             
-            self.output.detail(&format!(
+            output.detail(&format!(
                 "Uploading chunk: bytes {}-{}/{} (final: {})", 
                 uploaded, end - 1, total_size, is_final_chunk
             ));
 
             // Use PATCH for all chunks, including the final one
-            let mut patch_request = self
-                .client
+            let mut patch_request = client
                 .patch(&current_location)
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", chunk.len().to_string());
@@ -462,12 +657,19 @@ impl BlobOperations {
             }
 
             let patch_response = patch_request.send().await.map_err(|e| {
-                self.output.error(&format!("Failed to upload chunk: {}", e));
+                output.error(&format!("Failed to upload chunk: {}", e));
                 RegistryError::Network(e.to_string())
             })?;
 
-            if !patch_response.status().is_success() {
-                let status = patch_response.status();
+            let status = patch_response.status();
+            if status == 401 {
+                // Return 401 error for token manager to catch and retry
+                return Err(RegistryError::Registry(format!(
+                    "401 Unauthorized: Failed to upload chunk - token may have expired"
+                )));
+            }
+
+            if !status.is_success() {
                 let error_text = patch_response
                     .text()
                     .await
@@ -484,11 +686,11 @@ impl BlobOperations {
                     current_location = if new_location_str.starts_with("http") {
                         new_location_str.to_string()
                     } else if new_location_str.starts_with('/') {
-                        format!("{}{}", self.address, new_location_str)
+                        format!("{}{}", address, new_location_str)
                     } else {
-                        format!("{}/v2/{}/blobs/uploads/{}", self.address, repository, new_location_str)
+                        format!("{}/v2/{}/blobs/uploads/{}", address, repository, new_location_str)
                     };
-                    self.output.detail(&format!("Updated location for next chunk: {}", current_location));
+                    output.detail(&format!("Updated location for next chunk: {}", current_location));
                 }
             }
 
@@ -496,11 +698,10 @@ impl BlobOperations {
         }
 
         // After all chunks are uploaded with PATCH, send final PUT with digest only (no body)
-        self.output.detail("Finalizing chunked upload with digest...");
+        output.detail("Finalizing chunked upload with digest...");
         let final_url = format!("{}?digest={}", current_location, digest);
         
-        let mut put_request = self
-            .client
+        let mut put_request = client
             .put(&final_url)
             .header("Content-Length", "0"); // No body for final PUT
 
@@ -509,19 +710,26 @@ impl BlobOperations {
         }
 
         let final_response = put_request.send().await.map_err(|e| {
-            self.output.error(&format!("Failed to finalize chunked upload: {}", e));
+            output.error(&format!("Failed to finalize chunked upload: {}", e));
             RegistryError::Network(e.to_string())
         })?;
 
-        if final_response.status().is_success() {
-            self.output.success(&format!(
+        let status = final_response.status();
+        if status == 401 {
+            // Return 401 error for token manager to catch and retry
+            return Err(RegistryError::Registry(format!(
+                "401 Unauthorized: Failed to finalize chunked upload - token may have expired"
+            )));
+        }
+
+        if status.is_success() {
+            output.success(&format!(
                 "Blob {} uploaded successfully via multi-chunk upload", 
                 &digest[..16]
             ));
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             return Ok(digest.to_string());
         } else {
-            let status = final_response.status();
             let error_text = final_response
                 .text()
                 .await

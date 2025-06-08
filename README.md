@@ -1,13 +1,33 @@
-# Docker Image Pusher v0.3.0
+# Docker Image Pusher v0.3.1
 
 [![Build Status](https://github.com/yorelog/docker-image-pusher/workflows/Build%20and%20Test/badge.svg)](https://github.com/yorelog/docker-image-pusher/actions)
 [![Crates.io](https://img.shields.io/crates/v/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Downloads](https://img.shields.io/crates/d/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 
-A **high-performance command-line tool** written in Rust for pushing Docker image tar packages directly to Docker registries. **Version 0.3.0** introduces revolutionary unified pipeline progress display with advanced performance monitoring, intelligent concurrency management, and real-time network regression analysis.
+A **high-performance command-line tool** written in Rust for pushing Docker image tar packages directly to Docker registries. **Version 0.3.1** introduces automatic token refresh for large blob uploads, ensuring reliable uploads of multi-gigabyte Docker images.
 
 ## [🇨🇳 中文文档](README_zh.md)
+
+## 🔧 NEW in v0.3.1 - Enhanced Token Management
+
+### 🛡️ **Automatic Token Refresh for Large Uploads**
+- **Long-running Upload Support**: Automatic token refresh during multi-gigabyte blob uploads
+- **Token Expiration Handling**: Seamless handling of authentication token expiration during lengthy operations
+- **Enhanced Reliability**: Prevents upload failures for large Docker images (>1GB) due to token timeout
+- **Intelligent Retry Logic**: Automatic retry with fresh tokens when 401 UNAUTHORIZED errors occur
+
+### 🚀 **Large Blob Upload Improvements**
+- **Chunked Upload Token Refresh**: Token management integrated into chunked upload operations
+- **Monolithic Upload Enhancement**: Token refresh capability for single-request uploads
+- **Upload Session Management**: Robust handling of Docker Registry v2 staged upload sessions
+- **Error Recovery**: Improved error handling and recovery mechanisms for network interruptions
+
+### 💪 **Robustness Enhancements**
+- **Multi-hour Upload Support**: Reliable uploads for very large images that take hours to complete
+- **Authentication Resilience**: Maintains authentication throughout long-running operations
+- **Network Stability**: Better handling of network fluctuations during large transfers
+- **Registry Compatibility**: Enhanced compatibility with various Docker registry implementations
 
 ## 🌟 NEW in v0.3.0 - Unified Pipeline Progress Display
 

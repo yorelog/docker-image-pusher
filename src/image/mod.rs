@@ -50,7 +50,6 @@ pub mod image_manager;
 pub mod manifest;
 pub mod manifest_handler;
 pub mod parser;
-pub mod tar_handler;
 
 // Specific exports to avoid ambiguity
 pub use blob_handler::BlobHandler;
@@ -61,7 +60,6 @@ pub use image_manager::ImageManager;
 pub use manifest::{get_layers, is_gzipped, parse_manifest};
 pub use manifest_handler::ManifestHandler;
 pub use parser::{ImageInfo, ImageParser, LayerInfo};
-pub use tar_handler::TarHandler;
 
 // Re-export ImageConfig only from parser to avoid ambiguity
 pub use parser::ImageConfig;

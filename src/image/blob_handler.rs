@@ -288,18 +288,21 @@ impl BlobHandler {
 
     /// Calculate blob priority for upload scheduling
     fn calculate_blob_priority(&self, size: u64, is_config: bool) -> u64 {
+        // Define small blob threshold locally since it's not in the simplified PipelineConfig
+        let small_blob_threshold = 10 * 1024 * 1024; // 10MB
+
         if is_config {
             // Config blobs get highest priority (lowest number)
             0
-        } else if size <= self.pipeline_config.small_blob_threshold {
-            // Small blobs get high priority
-            size
-        } else if size <= self.pipeline_config.large_layer_threshold {
+        } else if size > self.pipeline_config.large_layer_threshold {
+            // Large blobs get highest priority (lowest numbers) - big blobs first
+            1
+        } else if size > small_blob_threshold {
             // Medium blobs get medium priority
-            self.pipeline_config.small_blob_threshold + size
+            small_blob_threshold - size
         } else {
-            // Large blobs get lowest priority (highest numbers)
-            self.pipeline_config.large_layer_threshold + size
+            // Small blobs get lowest priority (highest numbers)
+            self.pipeline_config.large_layer_threshold + (small_blob_threshold - size)
         }
     }
 

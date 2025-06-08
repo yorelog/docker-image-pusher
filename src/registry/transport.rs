@@ -7,7 +7,6 @@
 
 use crate::error::{RegistryError, Result};
 use crate::logging::Logger;
-use crate::concurrency::ConcurrencyController;
 use crate::registry::pipeline::UnifiedPipeline;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -157,7 +156,6 @@ pub struct DeleteRequest {
 pub struct StandardRegistryTransport {
     client: reqwest::Client,
     logger: Logger,
-    concurrency: Option<Arc<dyn ConcurrencyController>>,
     pipeline: Option<Arc<UnifiedPipeline>>,
 }
 
@@ -171,14 +169,8 @@ impl StandardRegistryTransport {
         Self {
             client,
             logger,
-            concurrency: None,
             pipeline: None,
         }
-    }
-    
-    pub fn with_concurrency(mut self, concurrency: Arc<dyn ConcurrencyController>) -> Self {
-        self.concurrency = Some(concurrency);
-        self
     }
     
     pub fn with_pipeline(mut self, pipeline: Arc<UnifiedPipeline>) -> Self {
@@ -590,20 +582,16 @@ pub struct ParallelRegistryTransport {
     base_transport: StandardRegistryTransport,
     #[allow(dead_code)]
     pipeline: Arc<UnifiedPipeline>,
-    #[allow(dead_code)]
-    concurrency: Arc<dyn ConcurrencyController>,
 }
 
 impl ParallelRegistryTransport {
     pub fn new(
         base_transport: StandardRegistryTransport,
         pipeline: Arc<UnifiedPipeline>,
-        concurrency: Arc<dyn ConcurrencyController>,
     ) -> Self {
         Self {
             base_transport,
             pipeline,
-            concurrency,
         }
     }
     
@@ -652,12 +640,10 @@ impl TransportFactory {
     pub fn create_parallel(
         logger: Logger,
         pipeline: Arc<UnifiedPipeline>,
-        concurrency: Arc<dyn ConcurrencyController>,
     ) -> ParallelRegistryTransport {
         let base = StandardRegistryTransport::new(logger)
-            .with_pipeline(pipeline.clone())
-            .with_concurrency(concurrency.clone());
+            .with_pipeline(pipeline.clone());
             
-        ParallelRegistryTransport::new(base, pipeline, concurrency)
+        ParallelRegistryTransport::new(base, pipeline)
     }
 }

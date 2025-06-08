@@ -8,7 +8,6 @@ use crate::error::{RegistryError, Result};
 use crate::logging::Logger;
 use crate::registry::client::RegistryClient;
 use crate::registry::pipeline::UnifiedPipeline;
-use crate::concurrency::ConcurrencyController;
 use std::sync::Arc;
 
 /// Unified registry operations that support both upload and download
@@ -17,7 +16,6 @@ pub struct UnifiedRegistryOperations {
     client: RegistryClient,
     pipeline: Arc<UnifiedPipeline>,
     logger: Logger,
-    concurrency: Option<Arc<dyn ConcurrencyController>>,
 }
 
 /// Transfer operation metadata

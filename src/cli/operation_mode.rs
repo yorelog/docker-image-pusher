@@ -29,13 +29,6 @@ pub enum OperationMode {
         repository: String,
         reference: String,
     },
-
-    /// 模式5: 直接从tar推送（无缓存）
-    PushFromTar {
-        tar_file: String,
-        repository: String,
-        reference: String,
-    },
 }
 
 impl OperationMode {
@@ -46,7 +39,6 @@ impl OperationMode {
             OperationMode::ExtractAndCache { .. } => "Extract from tar file and cache locally",
             OperationMode::PushFromCacheUsingManifest { .. } => "Push from cache using manifest",
             OperationMode::PushFromCacheUsingTar { .. } => "Push from cache using tar reference",
-            OperationMode::PushFromTar { .. } => "Push directly from tar file",
         }
     }
 
@@ -57,7 +49,6 @@ impl OperationMode {
             OperationMode::ExtractAndCache { .. } => false,
             OperationMode::PushFromCacheUsingManifest { .. } => true,
             OperationMode::PushFromCacheUsingTar { .. } => true,
-            OperationMode::PushFromTar { .. } => true,
         }
     }
 
@@ -81,11 +72,6 @@ impl OperationMode {
                 repository,
                 reference,
             } => (repository, reference),
-            OperationMode::PushFromTar {
-                repository,
-                reference,
-                ..
-            } => (repository, reference),
         }
     }
 
@@ -93,7 +79,6 @@ impl OperationMode {
     pub fn get_source(&self) -> Option<&str> {
         match self {
             OperationMode::ExtractAndCache { tar_file, .. } => Some(tar_file),
-            OperationMode::PushFromTar { tar_file, .. } => Some(tar_file),
             _ => None,
         }
     }
@@ -121,14 +106,6 @@ impl OperationMode {
                 repository,
                 reference,
             } => Self::validate_repository_reference(repository, reference),
-            OperationMode::PushFromTar {
-                tar_file,
-                repository,
-                reference,
-            } => {
-                Self::validate_tar_file(tar_file)?;
-                Self::validate_repository_reference(repository, reference)
-            }
         }
     }
 
@@ -186,7 +163,6 @@ impl OperationMode {
             self,
             OperationMode::PushFromCacheUsingManifest { .. }
                 | OperationMode::PushFromCacheUsingTar { .. }
-                | OperationMode::PushFromTar { .. }
         )
     }
 
@@ -202,7 +178,7 @@ impl OperationMode {
     pub fn requires_tar_file(&self) -> bool {
         matches!(
             self,
-            OperationMode::ExtractAndCache { .. } | OperationMode::PushFromTar { .. }
+            OperationMode::ExtractAndCache { .. }
         )
     }
 }
@@ -238,17 +214,6 @@ impl std::fmt::Display for OperationMode {
                 reference,
             } => {
                 write!(f, "Push {}:{} from cache (tar)", repository, reference)
-            }
-            OperationMode::PushFromTar {
-                tar_file,
-                repository,
-                reference,
-            } => {
-                write!(
-                    f,
-                    "Push {} directly as {}:{}",
-                    tar_file, repository, reference
-                )
             }
         }
     }

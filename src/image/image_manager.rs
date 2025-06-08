@@ -7,7 +7,7 @@ use crate::error::{RegistryError, Result};
 use crate::image::cache::Cache;
 use crate::image::manifest::{ManifestType, ParsedManifest, parse_manifest_with_type};
 use crate::image::parser::ImageInfo;
-use crate::image::{BlobHandler, CacheManager, ManifestHandler, TarHandler};
+use crate::image::{BlobHandler, CacheManager, ManifestHandler};
 use crate::logging::Logger;
 use crate::registry::RegistryClient;
 use crate::registry::tar_utils::TarUtils;
@@ -20,11 +20,9 @@ pub struct ImageManager {
     output: Logger,
     pipeline_config: PipelineConfig,
     use_optimized_upload: bool,
-    concurrency_config: Option<crate::concurrency::ConcurrencyConfig>,
     // Specialized handlers for modular operations
     manifest_handler: ManifestHandler,
     blob_handler: BlobHandler,
-    tar_handler: TarHandler,
     cache_manager: CacheManager,
 }
 
@@ -39,7 +37,6 @@ impl ImageManager {
         // Initialize specialized handlers with correct constructors
         let manifest_handler = ManifestHandler::new(output.clone(), pipeline_config.clone());
         let blob_handler = BlobHandler::with_config(output.clone(), pipeline_config.clone());
-        let tar_handler = TarHandler::new(output.clone(), pipeline_config.clone(), true);
         let cache_manager = CacheManager::new(cache2, output.clone());
 
         Ok(Self {
@@ -47,10 +44,8 @@ impl ImageManager {
             output,
             pipeline_config,
             use_optimized_upload: true, // Default to optimized mode
-            concurrency_config: None,
             manifest_handler,
             blob_handler,
-            tar_handler,
             cache_manager,
         })
     }
@@ -69,7 +64,6 @@ impl ImageManager {
         // Initialize specialized handlers with correct constructors
         let manifest_handler = ManifestHandler::new(output.clone(), pipeline_config.clone());
         let blob_handler = BlobHandler::with_config(output.clone(), pipeline_config.clone());
-        let tar_handler = TarHandler::new(output.clone(), pipeline_config.clone(), use_optimized_upload);
         let cache_manager = CacheManager::new(cache2, output.clone());
 
         Ok(Self {
@@ -77,10 +71,8 @@ impl ImageManager {
             output,
             pipeline_config,
             use_optimized_upload,
-            concurrency_config: None,
             manifest_handler,
             blob_handler,
-            tar_handler,
             cache_manager,
         })
     }
@@ -123,21 +115,6 @@ impl ImageManager {
                 // 模式3和4使用相同的逻辑，因为缓存格式统一
                 self.push_from_cache(client, repository, reference, auth_token)
                     .await
-            }
-            OperationMode::PushFromTar {
-                tar_file,
-                repository,
-                reference,
-            } => {
-                if self.use_optimized_upload {
-                    self.push_from_tar_optimized(
-                        client, tar_file, repository, reference, auth_token,
-                    )
-                    .await
-                } else {
-                    self.push_from_tar(client, tar_file, repository, reference, auth_token)
-                        .await
-                }
             }
         }
     }
@@ -363,79 +340,6 @@ impl ImageManager {
         self.output.success(&format!(
             "Successfully pushed {}/{} from cache to {}/{}",
             source_repository, source_reference, target_repository, target_reference
-        ));
-        Ok(())
-    }
-
-    /// Push from tar file using optimized unified pipeline
-    async fn push_from_tar_optimized(
-        &mut self,
-        client: Option<&RegistryClient>,
-        tar_file: &str,
-        repository: &str,
-        reference: &str,
-        token: Option<&str>,
-    ) -> Result<()> {
-        let client = self.require_client(client)?;
-        let token = token.map(|s| s.to_string());
-
-        // Delegate to tar handler
-        self.tar_handler.push_from_tar_optimized(
-            client, tar_file, repository, reference, &token
-        ).await
-    }
-
-    /// Push directly from tar file (without caching)
-    async fn push_from_tar(
-        &mut self,
-        client: Option<&RegistryClient>,
-        tar_file: &str,
-        repository: &str,
-        reference: &str,
-        token: Option<&str>,
-    ) -> Result<()> {
-        let client = self.require_client(client)?;
-        let token = token.map(|s| s.to_string());
-        let tar_path = Path::new(tar_file);
-
-        self.validate_tar_file(tar_path)?;
-        self.output.info(&format!(
-            "Pushing {}/{} directly from tar file",
-            repository, reference
-        ));
-
-        // 解析tar文件获取镜像信息
-        let image_info = TarUtils::parse_image_info(tar_path)?;
-
-        self.output.detail(&format!(
-            "Found {} layers, total size: {}",
-            image_info.layers.len(),
-            self.output.format_size(image_info.total_size)
-        ));
-
-        // 推送config blob
-        self.push_config_from_tar(
-            client,
-            tar_path,
-            &image_info.config_digest,
-            repository,
-            &token,
-        )
-        .await?;
-
-        // 推送所有layer blobs
-        self.push_layers_from_tar(client, tar_path, &image_info.layers, repository, &token)
-            .await?;
-
-        // 创建并推送manifest
-        let manifest_json = self.create_manifest_from_image_info(&image_info)?;
-        client
-            .upload_manifest_with_token(&manifest_json, repository, reference, &token)
-            .await?;
-
-        self.output.success(&format!(
-            "Successfully pushed {}/{} from tar file",
-            repository, reference
         ));
         Ok(())
     }
@@ -713,64 +617,6 @@ impl ImageManager {
     /// 获取当前配置状态
     pub fn get_config(&self) -> (bool, &PipelineConfig) {
         (self.use_optimized_upload, &self.pipeline_config)
-    }
-
-    /// Configure concurrency management through the new concurrency module
-    /// 
-    /// This method integrates with the unified concurrency management system,
-    /// replacing the old pipeline-specific concurrency configuration.
-    pub fn configure_concurrency(&mut self, config: crate::concurrency::ConcurrencyConfig) {
-        // Store the concurrency config for use with the concurrency manager
-        // The actual concurrency control is now handled by the dedicated concurrency module
-        // which provides advanced features like dynamic adjustment, performance monitoring,
-        // and intelligent strategy selection.
-        self.concurrency_config = Some(config);
-        
-        self.output.detail("Concurrency management configured using unified concurrency module");
-    }
-
-    /// Create appropriate concurrency manager based on configuration
-    /// 
-    /// Returns a concurrency manager instance based on the configured strategy.
-    /// This provides a factory method for creating the right type of concurrency
-    /// manager for the current configuration.
-    pub fn create_concurrency_manager(&self) -> Result<Box<dyn crate::concurrency::ConcurrencyController>> {
-        let config = self.concurrency_config.as_ref()
-            .ok_or_else(|| crate::error::RegistryError::Validation(
-                "No concurrency configuration available. Call configure_concurrency() first.".to_string()
-            ))?;
-
-        // Always use adaptive concurrency manager
-        self.output.detail("Creating adaptive concurrency manager");
-        Ok(Box::new(crate::concurrency::AdaptiveConcurrencyManager::new(config.clone())))
-    }
-
-    /// Get configured concurrency limits for pipeline operations
-    /// 
-    /// Returns the concurrency limits from the stored configuration,
-    /// providing backward compatibility for pipeline operations that
-    /// need basic concurrency information.
-    pub fn get_concurrency_limits(&self) -> (usize, usize, usize) {
-        if let Some(config) = &self.concurrency_config {
-            (
-                config.limits.max_concurrent,
-                config.limits.small_file_concurrent,
-                config.limits.large_file_concurrent,
-            )
-        } else {
-            // Default values for backward compatibility
-            (8, 12, 4)
-        }
-    }
-
-    /// Configure simple concurrency (convenience method)
-    /// 
-    /// This is a convenience method for simple use cases that only need
-    /// to set maximum concurrency without advanced features.
-    pub fn configure_simple_concurrency(&mut self, max_concurrent: usize) {
-        let config = crate::concurrency::ConcurrencyConfig::default()
-            .with_max_concurrent(max_concurrent);
-        self.configure_concurrency(config);
     }
 
     /// Handle OCI index or Docker manifest list

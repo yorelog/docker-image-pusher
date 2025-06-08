@@ -116,11 +116,6 @@ impl Runner {
                     Some(pull_args.cache_dir.to_str().unwrap()),
                     pull_args.verbose,
                 )?;
-
-                // Configure concurrency based on CLI args
-                let concurrency_config = crate::concurrency::ConcurrencyConfig::default()
-                    .with_max_concurrent(pull_args.max_concurrent);
-                image_manager.configure_concurrency(concurrency_config);
                 
                 // Parse the image reference to get registry, repository, and tag
                 let parsed_image = pull_args.parse_image()?;
@@ -181,12 +176,6 @@ impl Runner {
                     push_args.verbose,
                 )?;
 
-                // Configure adaptive concurrency with simplified arguments
-                let concurrency_config = crate::create_concurrency_config_from_args(
-                    push_args.max_concurrent,
-                );
-                image_manager.configure_concurrency(concurrency_config);
-
                 // Parse the target image reference to get registry, repository, and tag
                 let parsed_target = push_args.parse_target()?;
 
@@ -209,52 +198,47 @@ impl Runner {
                     .authenticate_with_registry(&client, &auth_config, &parsed_target.registry, &parsed_target.repository)
                     .await?;
 
-                let mode = if push_args.is_tar_source() {
-                    OperationMode::PushFromTar {
-                        tar_file: push_args.source.clone(),
-                        repository: parsed_target.repository,
-                        reference: parsed_target.tag,
-                    }
-                } else {
-                    if let Some((source_repo, source_ref)) = push_args.parse_source_repository() {
-                        // Apply the same repository name normalization that's used during caching
-                        // to ensure we look up the image with the correct cache key
-                        let normalized_source_repo = if source_repo.contains('/') {
-                            source_repo.clone()
-                        } else {
-                            format!("library/{}", source_repo)
-                        };
-                        
-                        if image_manager.is_image_cached(&normalized_source_repo, &source_ref)? {
-                            // Use the new method that supports separate source and target coordinates
-                            image_manager
-                                .execute_push_from_cache_with_source(
-                                    &normalized_source_repo,
-                                    &source_ref,
-                                    &parsed_target.repository,
-                                    &parsed_target.tag,
-                                    Some(&enhanced_client),
-                                    token.as_deref(),
-                                )
-                                .await?;
-                            return Ok(());
-                        } else {
-                            return Err(RegistryError::Validation(format!(
-                                "Source image {}:{} not found in cache. Please pull it first.",
-                                source_repo, source_ref
-                            )));
-                        }
+                if push_args.is_tar_source() {
+                    // TAR sources are no longer supported as a separate mode
+                    return Err(crate::error::RegistryError::Validation(
+                        "TAR file pushing is no longer supported as a separate operation mode".to_string()
+                    ));
+                }
+
+                if let Some((source_repo, source_ref)) = push_args.parse_source_repository() {
+                    // Apply the same repository name normalization that's used during caching
+                    // to ensure we look up the image with the correct cache key
+                    let normalized_source_repo = if source_repo.contains('/') {
+                        source_repo.clone()
+                    } else {
+                        format!("library/{}", source_repo)
+                    };
+                    
+                    if image_manager.is_image_cached(&normalized_source_repo, &source_ref)? {
+                        // Use the new method that supports separate source and target coordinates
+                        image_manager
+                            .execute_push_from_cache_with_source(
+                                &normalized_source_repo,
+                                &source_ref,
+                                &parsed_target.repository,
+                                &parsed_target.tag,
+                                Some(&enhanced_client),
+                                token.as_deref(),
+                            )
+                            .await?;
+                        return Ok(());
                     } else {
                         return Err(RegistryError::Validation(format!(
-                            "Invalid source format: {}. Expected repository:tag or tar file path.",
-                            push_args.source
+                            "Source image {}:{} not found in cache. Please pull it first.",
+                            source_repo, source_ref
                         )));
                     }
-                };
-
-                image_manager
-                    .execute_operation(&mode, Some(&enhanced_client), token.as_deref())
-                    .await?;
+                } else {
+                    return Err(RegistryError::Validation(format!(
+                        "Invalid source format: {}. Expected repository:tag or tar file path.",
+                        push_args.source
+                    )));
+                }
             }
             Commands::List(list_args) => {
                 self.execute_list_command(&list_args).await?;

@@ -1,6 +1,6 @@
 [package]
 name = "docker-image-pusher"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = ["yorelog <yorelog@gmail.com>"]
 description = "High-performance command-line tool for pushing Docker image tar packages directly to Docker registries"
@@ -43,6 +43,10 @@ path = "examples/optimized_upload_demo.rs"
 [[example]]
 name = "oci_client_integration_demo"
 path = "examples/oci_client_integration_demo.rs"
+
+[[example]]
+name = "concurrency_monitoring_demo"
+path = "examples/concurrency_monitoring_demo.rs"
 
 
 

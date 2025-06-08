@@ -110,14 +110,26 @@ impl BlobHandler {
             });
         }
 
-        // Execute concurrent blob uploads using semaphore-based concurrency control
+        // Execute concurrent blob uploads using adaptive concurrency control
+        let total_size: u64 = upload_tasks.iter().map(|t| t.size).sum();
+        let avg_blob_size = if !upload_tasks.is_empty() { 
+            total_size / upload_tasks.len() as u64 
+        } else { 
+            0 
+        };
+        
+        // Adaptive concurrency based on blob sizes and memory constraints
+        let effective_concurrency = self.calculate_effective_concurrency(avg_blob_size, total_size);
+        
         self.logger.info(&format!(
-            "Executing {} blob uploads with {} concurrent workers",
+            "Executing {} blob uploads with {} concurrent workers (adaptive: avg_size={}, total={})",
             upload_tasks.len(),
-            self.pipeline_config.max_concurrent
+            effective_concurrency,
+            self.format_size(avg_blob_size),
+            self.format_size(total_size)
         ));
 
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(self.pipeline_config.max_concurrent));
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
         let client_arc = std::sync::Arc::new(client.clone());
         let logger_arc = std::sync::Arc::new(self.logger.clone());
         let repository_arc = std::sync::Arc::new(repository.to_string());
@@ -130,7 +142,10 @@ impl BlobHandler {
         let mut sorted_tasks = upload_tasks;
         sorted_tasks.sort_by_key(|task| task.priority);
 
-        // Create concurrent upload futures
+        // Create concurrent upload futures with active task monitoring
+        let active_tasks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak_concurrent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        
         let upload_futures: Vec<_> = sorted_tasks
             .into_iter()
             .enumerate()
@@ -140,20 +155,47 @@ impl BlobHandler {
                 let logger = std::sync::Arc::clone(&logger_arc);
                 let repository = std::sync::Arc::clone(&repository_arc);
                 let token = std::sync::Arc::clone(&token_arc);
+                let active_tasks = std::sync::Arc::clone(&active_tasks);
+                let peak_concurrent = std::sync::Arc::clone(&peak_concurrent);
 
                 tokio::spawn(async move {
                     Self::execute_blob_upload_with_data(
-                        task, index, semaphore, client, logger, repository, token,
+                        task, index, semaphore, client, logger, repository, token, active_tasks, peak_concurrent,
                     )
                     .await
                 })
             })
             .collect();
 
+        // Start a background monitoring task to show periodic status updates
+        let monitor_active_tasks = std::sync::Arc::clone(&active_tasks);
+        let monitor_logger = std::sync::Arc::clone(&logger_arc);
+        let total_tasks = upload_futures.len();
+        
+        let monitor_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let current_active = monitor_active_tasks.load(std::sync::atomic::Ordering::SeqCst);
+                if current_active > 0 {
+                    monitor_logger.info(&format!(
+                        "📊 Upload progress: {} active tasks, {} remaining",
+                        current_active,
+                        total_tasks.saturating_sub(total_tasks - current_active)
+                    ));
+                } else {
+                    break; // All tasks completed
+                }
+            }
+        });
+
         // Wait for all uploads to complete
         let results = futures::future::try_join_all(upload_futures)
             .await
             .map_err(|e| RegistryError::Upload(format!("Blob upload task failed: {}", e)))?;
+
+        // Cancel the monitoring task since uploads are complete
+        monitor_handle.abort();
 
         // Check for upload failures
         for result in results {
@@ -169,10 +211,13 @@ impl BlobHandler {
             total_size
         };
 
+        let peak_tasks = peak_concurrent.load(std::sync::atomic::Ordering::SeqCst);
+
         self.logger.success(&format!(
-            "✅ Unified Pipeline blob upload completed successfully in {} (avg speed: {}/s)",
+            "✅ Unified Pipeline blob upload completed successfully in {} (avg speed: {}/s) [Peak concurrent tasks: {}]",
             self.logger.format_duration(elapsed),
-            self.logger.format_size(avg_speed)
+            self.logger.format_size(avg_speed),
+            peak_tasks
         ));
         
         Ok(())
@@ -308,6 +353,72 @@ impl BlobHandler {
         }
     }
 
+    /// Calculate effective concurrency based on blob sizes and memory constraints
+    fn calculate_effective_concurrency(&self, avg_blob_size: u64, total_size: u64) -> usize {
+        let max_concurrent = self.pipeline_config.max_concurrent;
+        
+        // Memory-based constraints to prevent SIGKILL
+        const MAX_MEMORY_USAGE: u64 = 2 * 1024 * 1024 * 1024; // 2GB limit
+        const LARGE_BLOB_THRESHOLD: u64 = 500 * 1024 * 1024; // 500MB
+        const HUGE_BLOB_THRESHOLD: u64 = 1024 * 1024 * 1024; // 1GB
+        
+        // If total size is very large, be more conservative
+        if total_size > 10 * 1024 * 1024 * 1024 { // 10GB total
+            self.logger.warning(&format!(
+                "⚠️ Very large total blob size detected ({}), using conservative concurrency",
+                self.format_size(total_size)
+            ));
+            return std::cmp::min(2, max_concurrent);
+        }
+        
+        // If we have very large blobs, reduce concurrency drastically
+        if avg_blob_size > HUGE_BLOB_THRESHOLD {
+            self.logger.warning(&format!(
+                "⚠️ Very large blobs detected (avg: {}), using minimal concurrency",
+                self.format_size(avg_blob_size)
+            ));
+            return 1; // Only one huge blob at a time
+        }
+        
+        if avg_blob_size > LARGE_BLOB_THRESHOLD {
+            let safe_concurrency = std::cmp::min(2, max_concurrent);
+            self.logger.info(&format!(
+                "📊 Large blobs detected (avg: {}), reducing concurrency to {}",
+                self.format_size(avg_blob_size), safe_concurrency
+            ));
+            return safe_concurrency;
+        }
+        
+        // Memory-based calculation for smaller blobs
+        let estimated_memory_per_blob = avg_blob_size + (10 * 1024 * 1024); // blob + 10MB overhead
+        let safe_concurrent_by_memory = if estimated_memory_per_blob > 0 {
+            (MAX_MEMORY_USAGE / estimated_memory_per_blob) as usize
+        } else {
+            max_concurrent
+        };
+        
+        // Also consider total memory usage if all blobs were loaded
+        let safe_concurrent_by_total = if total_size > 0 {
+            std::cmp::max(1, (MAX_MEMORY_USAGE / total_size) as usize * max_concurrent)
+        } else {
+            max_concurrent
+        };
+        
+        let effective = std::cmp::min(
+            max_concurrent,
+            std::cmp::min(safe_concurrent_by_memory, safe_concurrent_by_total)
+        ).max(1);
+        
+        if effective < max_concurrent {
+            self.logger.info(&format!(
+                "📊 Memory-constrained concurrency: {} (was {}) - estimated {} per blob, total {}",
+                effective, max_concurrent, self.format_size(estimated_memory_per_blob), self.format_size(total_size)
+            ));
+        }
+        
+        effective
+    }
+
     /// Execute a single blob upload with pre-loaded data (avoids cache cloning)
     async fn execute_blob_upload_with_data(
         task: BlobUploadTaskWithData,
@@ -317,42 +428,65 @@ impl BlobHandler {
         logger: Arc<Logger>,
         repository: Arc<String>,
         token: Arc<Option<String>>,
+        active_tasks: Arc<std::sync::atomic::AtomicUsize>,
+        peak_concurrent: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Result<()> {
         // Acquire semaphore permit for concurrency control
         let _permit = semaphore.acquire().await
             .map_err(|e| RegistryError::Upload(format!("Failed to acquire semaphore: {}", e)))?;
 
+        // Increment active task counter and update peak
+        let current_active = active_tasks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        peak_concurrent.fetch_max(current_active, std::sync::atomic::Ordering::SeqCst);
+
         let start_time = std::time::Instant::now();
         
         logger.detail(&format!(
-            "Upload task {}: Processing {} blob {} ({}) - priority {}",
+            "Upload task {}: Processing {} blob {} ({}) - priority {} [Active tasks: {}]",
             index + 1,
             if task.is_config { "config" } else { "layer" },
             &task.digest[..16],
             crate::common::FormatUtils::format_bytes(task.size),
-            task.priority
+            task.priority,
+            current_active
         ));
 
         // Upload blob using the unified token-aware method with pre-loaded data
-        client
+        let upload_result = client
             .upload_blob_with_token(&task.data, &task.digest, repository.as_ref(), token.as_ref())
-            .await?;
+            .await;
 
-        let elapsed = start_time.elapsed();
-        let speed = if elapsed.as_secs() > 0 {
-            task.size / elapsed.as_secs()
-        } else {
-            task.size
-        };
+        // Decrement active task counter
+        let remaining_active = active_tasks.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1;
 
-        logger.success(&format!(
-            "✅ Blob {} uploaded in {} ({}/s)",
-            &task.digest[..16],
-            logger.format_duration(elapsed),
-            logger.format_size(speed)
-        ));
+        match upload_result {
+            Ok(_) => {
+                let elapsed = start_time.elapsed();
+                let speed = if elapsed.as_secs() > 0 {
+                    task.size / elapsed.as_secs()
+                } else {
+                    task.size
+                };
 
-        Ok(())
+                logger.success(&format!(
+                    "✅ Blob {} uploaded in {} ({}/s) [Active tasks: {}]",
+                    &task.digest[..16],
+                    logger.format_duration(elapsed),
+                    logger.format_size(speed),
+                    remaining_active
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                logger.error(&format!(
+                    "❌ Blob {} upload failed: {} [Active tasks: {}]",
+                    &task.digest[..16],
+                    e,
+                    remaining_active
+                ));
+                Err(e)
+            }
+        }
     }
 
     // Helper method for formatting sizes

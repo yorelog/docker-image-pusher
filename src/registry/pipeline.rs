@@ -23,7 +23,7 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            max_concurrent: 8,
+            max_concurrent: 3, // Reduced from 8 to prevent memory exhaustion
             timeout_seconds: 300,
             retry_attempts: 3,
             large_layer_threshold: 100 * 1024 * 1024, // 100MB

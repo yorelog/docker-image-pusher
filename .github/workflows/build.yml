@@ -50,19 +50,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: docker-image-pusher
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            binary_name: docker-image-pusher
-            setup_deps: |
-              sudo apt-get update
-              sudo apt-get install -y musl-tools musl-dev
-              sudo ln -s /usr/include/linux /usr/include/x86_64-linux-musl/
-              sudo ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/
-              sudo ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/
-            env_vars: |
-              CC_x86_64_unknown_linux_musl=musl-gcc
-              OPENSSL_STATIC=1
-              OPENSSL_DIR=/usr/lib/x86_64-linux-gnu
 
             
     runs-on: ${{ matrix.os }}
@@ -70,6 +57,12 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      
+    - name: Install system dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libssl-dev
       
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -87,7 +80,11 @@ jobs:
         
     - name: Build release binary
       run: cargo build --release --target ${{ matrix.target }}
-      
+      env:
+        OPENSSL_STATIC: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+        OPENSSL_LIB_DIR: ${{ matrix.os == 'ubuntu-latest' && '/usr/lib/x86_64-linux-gnu' || '' }}
+        OPENSSL_INCLUDE_DIR: ${{ matrix.os == 'ubuntu-latest' && '/usr/include/openssl' || '' }}
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:

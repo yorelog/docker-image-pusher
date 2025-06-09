@@ -47,8 +47,8 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: docker-image-pusher
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
             binary_name: docker-image-pusher
             
     runs-on: ${{ matrix.os }}

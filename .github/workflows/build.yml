@@ -39,7 +39,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             binary_name: docker-image-pusher
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -62,7 +62,7 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config libssl-dev
+        sudo apt-get install -y musl-tools
       
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -80,10 +80,6 @@ jobs:
         
     - name: Build release binary
       run: cargo build --release --target ${{ matrix.target }}
-      env:
-        OPENSSL_STATIC: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
-        OPENSSL_LIB_DIR: ${{ matrix.os == 'ubuntu-latest' && '/usr/lib/x86_64-linux-gnu' || '' }}
-        OPENSSL_INCLUDE_DIR: ${{ matrix.os == 'ubuntu-latest' && '/usr/include/openssl' || '' }}
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -110,7 +106,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          artifacts/docker-image-pusher-x86_64-unknown-linux-gnu/docker-image-pusher
+          artifacts/docker-image-pusher-x86_64-unknown-linux-musl/docker-image-pusher
           artifacts/docker-image-pusher-x86_64-pc-windows-msvc/docker-image-pusher.exe
           artifacts/docker-image-pusher-x86_64-apple-darwin/docker-image-pusher
           artifacts/docker-image-pusher-aarch64-apple-darwin/docker-image-pusher
@@ -136,7 +132,7 @@ jobs:
           ```
           
           ### Download Instructions
-          - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-gnu)
+          - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-musl)
           - **Windows x64**: `docker-image-pusher.exe` (x86_64-pc-windows-msvc)
           - **macOS Intel**: `docker-image-pusher` (x86_64-apple-darwin)
           - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)

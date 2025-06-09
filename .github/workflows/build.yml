@@ -47,9 +47,23 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: docker-image-pusher
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: docker-image-pusher
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary_name: docker-image-pusher
+            setup_deps: |
+              sudo apt-get update
+              sudo apt-get install -y musl-tools musl-dev
+              sudo ln -s /usr/include/linux /usr/include/x86_64-linux-musl/
+              sudo ln -s /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/
+              sudo ln -s /usr/include/asm-generic /usr/include/x86_64-linux-musl/
+            env_vars: |
+              CC_x86_64_unknown_linux_musl=musl-gcc
+              OPENSSL_STATIC=1
+              OPENSSL_DIR=/usr/lib/x86_64-linux-gnu
+
             
     runs-on: ${{ matrix.os }}
     

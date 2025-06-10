@@ -2,7 +2,7 @@ name: Build and Test
 
 on:
   push:
-    branches: [ main,dev]
+    branches: [ main, dev ]
   pull_request:
     branches: [ main ]
 
@@ -38,20 +38,32 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux builds - focus on musl for static linking
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary_name: docker-image-pusher
+            cross: false
+          - os: ubuntu-latest  
+            target: aarch64-unknown-linux-musl
+            binary_name: docker-image-pusher
+            cross: true
+          
+          # Windows builds
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: docker-image-pusher.exe
+            cross: false
+          
+          # macOS builds (statically linked by default)
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: docker-image-pusher
+            cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: docker-image-pusher
+            cross: false
 
-            
     runs-on: ${{ matrix.os }}
     
     steps:
@@ -69,6 +81,10 @@ jobs:
       with:
         targets: ${{ matrix.target }}
         
+    - name: Install cross for cross compilation
+      if: matrix.cross == true
+      run: cargo install cross
+        
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
@@ -78,8 +94,17 @@ jobs:
           target
         key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         
-    - name: Build release binary
+    - name: Build release binary (native)
+      if: matrix.cross == false
       run: cargo build --release --target ${{ matrix.target }}
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static"
+        
+    - name: Build release binary (cross)
+      if: matrix.cross == true
+      run: cross build --release --target ${{ matrix.target }}
+      env:
+        RUSTFLAGS: "-C target-feature=+crt-static"
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -107,32 +132,44 @@ jobs:
       with:
         files: |
           artifacts/docker-image-pusher-x86_64-unknown-linux-musl/docker-image-pusher
+          artifacts/docker-image-pusher-aarch64-unknown-linux-musl/docker-image-pusher
           artifacts/docker-image-pusher-x86_64-pc-windows-msvc/docker-image-pusher.exe
           artifacts/docker-image-pusher-x86_64-apple-darwin/docker-image-pusher
           artifacts/docker-image-pusher-aarch64-apple-darwin/docker-image-pusher
         body: |
           ## Docker Image Pusher ${{ github.ref_name }}
           
-          This release includes pre-built binaries for multiple platforms.
+          This release includes statically-linked binaries for multiple platforms with no external dependencies.
           
           ### Features
-          - Push Docker image tar packages directly to registries
-          - Chunked uploads for large images (>10GB support)
+          - Memory-optimized streaming for large Docker images (>10GB support)
+          - Import Docker tar archives created by `docker save`
+          - Push images directly to OCI registries
+          - Chunked layer processing to prevent memory exhaustion
           - Authentication support with Docker registries
           - Real-time progress tracking
-          - Cross-platform compatibility
+          - Cross-platform compatibility with no external dependencies
           
           ### Usage
+          **Push cached image:**
           ```bash
-          ./docker-image-pusher \
-            --address http://your-registry:5000 \
+          ./docker-image-pusher push \
+            --registry-url https://your-registry.com \
             --username your-username \
             --password your-password \
-            --file /path/to/image.tar
+            --image-name myapp:latest
+          ```
+          
+          **Import Docker tar:**
+          ```bash
+          ./docker-image-pusher import \
+            --tar-file /path/to/image.tar \
+            --image-name myapp:latest
           ```
           
           ### Download Instructions
-          - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-musl)
+          - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-musl) - statically linked
+          - **Linux ARM64**: `docker-image-pusher` (aarch64-unknown-linux-musl) - statically linked
           - **Windows x64**: `docker-image-pusher.exe` (x86_64-pc-windows-msvc)
           - **macOS Intel**: `docker-image-pusher` (x86_64-apple-darwin)
           - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)

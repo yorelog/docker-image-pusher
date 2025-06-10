@@ -1,16 +1,38 @@
 [package]
 name = "docker-image-pusher"
 version = "0.1.0"
-edition = "2024"
-
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A memory-optimized Docker image transfer tool for handling large images efficiently"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["docker", "oci", "registry", "streaming", "memory-optimization"]
+categories = ["command-line-utilities", "development-tools"]
+repository = "https://github.com/yourusername/docker-image-pusher"
+documentation = "https://github.com/yourusername/docker-image-pusher/blob/main/README.md"
 
 [dependencies]
+# Core async runtime with filesystem support
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "fs", "io-util"] }
+
+# OCI registry client with TLS support (using rustls to avoid OpenSSL dependency)
+oci-client = { version = "0.15.0", features = ["rustls-tls"], default-features = false }
+
+# Command-line interface 
+clap = { version = "4.5.40", features = ["derive"] }
+
+# Error handling
 anyhow = "1.0.98"
-clap = { version = "4.5.39", features = ["derive"] }
-oci-client = { version = "0.15.0", features = ["rustls-tls"] }
-tokio = { version = "1.45.1", features = ["rt-multi-thread", "fs"] }
-serde_json = "1.0"
-futures = "0.3"
 thiserror = "2.0"
-sha256 = "1.1"
-openssl = { version = "0.10", features = ["vendored"] }
+
+# JSON serialization for manifests and metadata
+serde_json = "1.0"
+
+# For parsing Docker tar archives
+tar = "0.4"
+flate2 = "1.0"
+
+# For computing file digests
+sha2 = "0.10"
+
+

@@ -2,18 +2,21 @@
 name = "docker-image-pusher"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["yorelog <yorelog@gmail.com>"]
 description = "A memory-optimized Docker image transfer tool for handling large images efficiently"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["docker", "oci", "registry", "streaming", "memory-optimization"]
 categories = ["command-line-utilities", "development-tools"]
-repository = "https://github.com/yourusername/docker-image-pusher"
-documentation = "https://github.com/yourusername/docker-image-pusher/blob/main/README.md"
+repository = "https://github.com/yorelog/docker-image-pusher"
+documentation = "https://github.com/yorelog/docker-image-pusher/blob/main/README.md"
 
 [dependencies]
 # Core async runtime with filesystem support
 tokio = { version = "1.45.1", features = ["rt-multi-thread", "fs", "io-util"] }
+
+# Futures utilities for concurrent processing
+futures = "0.3"
 
 # OCI registry client with TLS support (using rustls to avoid OpenSSL dependency)
 oci-client = { version = "0.15.0", features = ["rustls-tls"], default-features = false }

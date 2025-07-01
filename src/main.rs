@@ -13,6 +13,7 @@ APIs from the oci-client library.
 - **Local Caching**: Caches pulled images locally for faster subsequent pushes
 - **Registry Authentication**: Supports both anonymous and authenticated registry access
 - **Progress Monitoring**: Real-time feedback on layer transfer progress and sizes
+- **Media Type Detection**: Automatically detects layer compression format (gzip vs uncompressed)
 
 ## Architecture
 
@@ -28,12 +29,18 @@ The tool operates in two main phases:
    - Uploads layers individually with size-based optimization
    - Pushes final manifest to complete image transfer
 
+3. **Import Phase**:
+   - Extracts layers from Docker tar archives (docker save format)
+   - Maintains media type information for better registry compatibility
+   - Creates unified cache structure for consistency
+
 ## Memory Optimization Strategies
 
 - Parallel layer processing with controlled concurrency to utilize multiple CPU cores
 - Direct file-to-registry streaming without intermediate buffers
-- Chunked reading (50MB chunks) for layers exceeding 100MB
+- Chunked reading (64KB chunks) for layers exceeding 10MB
 - Semaphore-based rate limiting to prevent registry overload and memory pressure
+- Size-based upload strategies for optimal performance
 */
 
 use anyhow::Result;
@@ -50,6 +57,23 @@ use thiserror::Error;
 
 mod cache;
 mod image;
+
+// Constants for better code maintainability
+const CACHE_DIR: &str = ".cache";
+const LARGE_LAYER_THRESHOLD_MB: f64 = 100.0;
+const MEDIUM_LAYER_THRESHOLD_MB: f64 = 50.0;
+const LARGE_LAYER_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10MB for progress tracking
+const STREAM_BUFFER_SIZE: usize = 65536; // 64KB buffer
+const PROGRESS_UPDATE_INTERVAL_SECS: u64 = 2;
+const RATE_LIMIT_DELAY_MS: u64 = 200;
+
+// Progress tracking intervals based on layer size
+const LARGE_LAYER_PROGRESS_INTERVAL_SECS: u64 = 5;
+const NORMAL_LAYER_PROGRESS_INTERVAL_SECS: u64 = 10;
+
+// Network speed estimation constants
+const ESTIMATED_SPEED_MBPS: f64 = 10.0; // Conservative estimate for ETA calculation
+const GZIP_MAGIC_BYTES: [u8; 2] = [0x1f, 0x8b];
 
 /// Custom error types for the Docker image pusher application
 ///
@@ -79,6 +103,7 @@ pub enum PusherError {
     /// JSON serialization/deserialization errors
     #[error("Serde error: {0}")]
     SerdeError(#[from] serde_json::Error),
+    
     /// Error when requested cached image is not found
     #[error("Cache not found")]
     CacheNotFound,
@@ -87,6 +112,23 @@ pub enum PusherError {
     /// Including tar archive parsing and layer extraction
     #[error("Tar processing error: {0}")]
     TarError(String),
+}
+
+impl PusherError {
+    /// Creates a cache error with formatted message
+    pub fn cache_error(msg: impl std::fmt::Display) -> Self {
+        PusherError::CacheError(msg.to_string())
+    }
+
+    /// Creates a tar error with formatted message
+    pub fn tar_error(msg: impl std::fmt::Display) -> Self {
+        PusherError::TarError(msg.to_string())
+    }
+
+    /// Creates a push error with formatted message
+    pub fn push_error(msg: impl std::fmt::Display) -> Self {
+        PusherError::PushError(msg.to_string())
+    }
 }
 
 /// Command-line interface definition for the Docker image pusher
@@ -274,7 +316,7 @@ async fn push_cached_image(
     username: &str,
     password: &str,
 ) -> Result<(), PusherError> {
-    let cache_dir = Path::new(".cache");
+    let cache_dir = Path::new(CACHE_DIR);
     let image_cache_dir = cache_dir.join(image::sanitize_image_name(source_image));
 
     // Setup Basic authentication for target registry
@@ -350,229 +392,17 @@ async fn push_cached_image(
             skipped_uploads += 1;
             continue;
         } // MEMORY OPTIMIZATION: Different strategies based on layer size
-        if layer_size_mb > 100.0 {
-            // Strategy for very large layers: Direct streaming without loading all into memory
-            println!(
-                "   🔄 Streaming large layer ({:.1} MB) directly to registry...",
-                layer_size_mb
-            );
-
-            // Use direct file reading for upload - let OCI client handle streaming internally
-            println!(
-                "   📤 Reading and uploading layer ({:.1} MB)...",
-                layer_size_mb
-            );
-            let upload_start = std::time::Instant::now();
-
-            let layer_data = tokio::fs::read(&layer_path).await.map_err(|e| {
-                PusherError::CacheError(format!("Failed to read cached layer {}: {}", digest, e))
-            })?;
-
-            let read_duration = upload_start.elapsed();
-            println!(
-                "   📖 File read completed in {:.1}s ({:.1} MB)",
-                read_duration.as_secs_f64(),
-                layer_data.len() as f64 / (1024.0 * 1024.0)
-            );
-
-            println!("   🚀 Starting upload to registry...");
-            println!(
-                "   📊 Layer size: {:.1} MB ({} bytes)",
-                layer_size_mb,
-                layer_data.len()
-            );
-
-            // Show estimated time based on previous upload speeds (if available)
-            if layer_size_mb > 1000.0 {
-                let estimated_time_min = layer_size_mb / 10.0 / 60.0; // Assuming ~10MB/s average
-                println!(
-                    "   ⏱️  Estimated upload time: {:.1}-{:.1} minutes (depends on network speed)",
-                    estimated_time_min * 0.5,
-                    estimated_time_min * 2.0
-                );
-            }
-
-            let network_start = std::time::Instant::now();
-
-            // Create a progress tracking task for very large layers
-            let progress_handle = if layer_size_mb > 100.0 {
-                let layer_size_mb_clone = layer_size_mb;
-                let layer_size_bytes = layer_data.len() as u64;
-                let network_start_clone = network_start;
-                let digest_suffix = digest.chars().skip(digest.len() - 8).collect::<String>();
-
-                // Different intervals based on layer size
-                let interval_secs = if layer_size_mb > 1000.0 { 5 } else { 10 };
-
-                Some(tokio::spawn(async move {
-                    let mut interval =
-                        tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
-                    let mut progress_counter = 1;
-                    loop {
-                        interval.tick().await;
-                        let elapsed = network_start_clone.elapsed();
-                        if elapsed.as_secs() > 0 {
-                            let elapsed_min = elapsed.as_secs_f64() / 60.0;
-
-                            // More detailed progress estimation with actual byte tracking
-                            let estimated_progress_percent = if elapsed.as_secs() > 10 {
-                                // Use a more aggressive progress curve for better feedback
-                                let time_factor =
-                                    elapsed.as_secs_f64() / (layer_size_mb_clone / 8.0); // Adjust estimation
-                                (time_factor / (1.0 + time_factor)) * 100.0
-                            } else {
-                                10.0 // Assume 10% in first 10 seconds
-                            }
-                            .min(95.0); // Cap at 95% until completion
-
-                            let estimated_transferred_mb =
-                                (estimated_progress_percent / 100.0) * layer_size_mb_clone;
-                            let estimated_remaining_mb =
-                                layer_size_mb_clone - estimated_transferred_mb;
-                            let estimated_transferred_bytes =
-                                (estimated_progress_percent / 100.0) * layer_size_bytes as f64;
-
-                            let current_speed_mbps = if elapsed.as_secs() > 5 {
-                                estimated_transferred_mb / elapsed.as_secs_f64()
-                            } else {
-                                10.0 // Conservative default
-                            };
-
-                            let remaining_time_min = if current_speed_mbps > 0.0 {
-                                estimated_remaining_mb / current_speed_mbps / 60.0
-                            } else {
-                                0.0
-                            };
-
-                            // Format size display with more detailed information
-                            let (transferred_display, total_display, unit) =
-                                if layer_size_mb_clone > 1024.0 {
-                                    (
-                                        estimated_transferred_mb / 1024.0,
-                                        layer_size_mb_clone / 1024.0,
-                                        "GB",
-                                    )
-                                } else {
-                                    (estimated_transferred_mb, layer_size_mb_clone, "MB")
-                                };
-
-                            println!("   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: ~{:.1} MB/s | ETA: {:.1}min", 
-                                progress_counter,
-                                estimated_progress_percent,
-                                transferred_display,
-                                total_display,
-                                unit,
-                                current_speed_mbps,
-                                remaining_time_min);
-
-                            // Show detailed byte-level information every other update
-                            if progress_counter % 2 == 0 {
-                                println!("   📊 Data transferred: {:.0}/{} bytes | Elapsed: {:.1}min | Layer: ...{}", 
-                                    estimated_transferred_bytes,
-                                    layer_size_bytes,
-                                    elapsed_min,
-                                    digest_suffix);
-                            }
-
-                            // Show network analysis for very large layers
-                            if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
-                                let gb_size = layer_size_mb_clone / 1024.0;
-                                let avg_speed = estimated_transferred_mb / elapsed.as_secs_f64();
-                                let completion_percent = if avg_speed > 0.0 {
-                                    ((estimated_transferred_mb / layer_size_mb_clone) * 100.0)
-                                        .min(95.0)
-                                } else {
-                                    estimated_progress_percent
-                                };
-                                println!("   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress", 
-                                    gb_size, avg_speed, completion_percent);
-                            }
-
-                            progress_counter += 1;
-                        }
-                    }
-                }))
-            } else {
-                None
-            };
-
-            // Perform the actual upload
-            let upload_result = client.push_blob(&target_ref, &layer_data, digest).await;
-
-            // Cancel progress tracking
-            if let Some(handle) = progress_handle {
-                handle.abort();
-            }
-
-            // Handle upload result
-            upload_result.map_err(|e| {
-                PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
-            })?;
-
-            let network_duration = network_start.elapsed();
-            let total_duration = upload_start.elapsed();
-            let upload_speed = if network_duration.as_secs() > 0 {
-                (layer_data.len() as f64 / (1024.0 * 1024.0)) / network_duration.as_secs_f64()
-            } else {
-                0.0
-            };
-
-            println!(
-                "   ⚡ Upload completed! Total: {:.1}s (read: {:.1}s, upload: {:.1}s) @ {:.1} MB/s",
-                total_duration.as_secs_f64(),
-                read_duration.as_secs_f64(),
-                network_duration.as_secs_f64(),
-                upload_speed
-            );
-
-            // Additional success details for large uploads
-            if layer_size_mb > 1000.0 {
-                let gb_transferred = layer_size_mb / 1024.0;
-                println!(
-                    "   🎉 Successfully transferred {:.2} GB in {:.1} minutes",
-                    gb_transferred,
-                    network_duration.as_secs_f64() / 60.0
-                );
-            }
+        if layer_size_mb > LARGE_LAYER_THRESHOLD_MB {
+            upload_large_layer(client, &target_ref, &layer_path, digest, layer_size_mb).await?;
         } else {
-            // Strategy for smaller layers: Direct read and upload with timing
-            println!("   📤 Uploading layer directly...");
-            let read_start = std::time::Instant::now();
-
-            let layer_data = tokio::fs::read(&layer_path).await.map_err(|e| {
-                PusherError::CacheError(format!("Failed to read cached layer {}: {}", digest, e))
-            })?;
-
-            let read_duration = read_start.elapsed();
-            let upload_start = std::time::Instant::now();
-
-            client
-                .push_blob(&target_ref, &layer_data, digest)
-                .await
-                .map_err(|e| {
-                    PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
-                })?;
-
-            let upload_duration = upload_start.elapsed();
-            let total_duration = read_start.elapsed();
-            let speed = if total_duration.as_secs() > 0 {
-                layer_size_mb / total_duration.as_secs_f64()
-            } else {
-                0.0
-            };
-
-            println!(
-                "   ⚡ Completed in {:.1}s (read: {:.1}ms, upload: {:.1}s) @ {:.1} MB/s",
-                total_duration.as_secs_f64(),
-                read_duration.as_millis(),
-                upload_duration.as_secs_f64(),
-                speed
-            );
+            upload_small_layer(client, &target_ref, &layer_path, digest, layer_size_mb).await?;
         }
+        
         println!("   ✅ Successfully uploaded layer {}", digest);
+        
         // Rate limiting: Add delay for large layers to prevent overwhelming the registry
-        if layer_size_mb > 50.0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        if layer_size_mb > MEDIUM_LAYER_THRESHOLD_MB {
+            tokio::time::sleep(tokio::time::Duration::from_millis(RATE_LIMIT_DELAY_MS)).await;
         }
         uploaded_layers.push(digest.clone());
     }
@@ -635,28 +465,259 @@ async fn push_cached_image(
 ///
 /// `Result<String, PusherError>` - The detected media type
 fn detect_layer_media_type(layer_path: &std::path::Path) -> Result<String, PusherError> {
-    // Read the first few bytes to detect compression
+    use std::io::Read;
+    
     let mut file = std::fs::File::open(layer_path)
-        .map_err(|e| PusherError::TarError(format!("Failed to open layer file: {}", e)))?;
+        .map_err(|e| PusherError::tar_error(format!("Failed to open layer file: {}", e)))?;
     
     let mut buffer = [0u8; 2];
-    use std::io::Read;
     let bytes_read = file.read(&mut buffer)
-        .map_err(|e| PusherError::TarError(format!("Failed to read layer header: {}", e)))?;
+        .map_err(|e| PusherError::tar_error(format!("Failed to read layer header: {}", e)))?;
     
-    if bytes_read >= 2 {
-        // Check for gzip magic number (0x1f 0x8b)
-        if buffer[0] == 0x1f && buffer[1] == 0x8b {
-            // This is a gzipped layer
-            Ok("application/vnd.docker.image.rootfs.diff.tar.gzip".to_string())
-        } else {
-            // This is an uncompressed tar layer
-            Ok("application/vnd.docker.image.rootfs.diff.tar".to_string())
-        }
+    if bytes_read >= 2 && buffer == GZIP_MAGIC_BYTES {
+        Ok("application/vnd.docker.image.rootfs.diff.tar.gzip".to_string())
+    } else if bytes_read >= 2 {
+        Ok("application/vnd.docker.image.rootfs.diff.tar".to_string())
     } else {
         // Default to gzipped if we can't determine
         Ok("application/vnd.docker.image.rootfs.diff.tar.gzip".to_string())
     }
+}
+
+/// Formats size display for progress reporting
+fn format_size_display(size_mb: f64) -> (f64, &'static str) {
+    if size_mb > 1024.0 {
+        (size_mb / 1024.0, "GB")
+    } else {
+        (size_mb, "MB")
+    }
+}
+
+/// Calculates upload progress estimation
+fn calculate_upload_progress(elapsed_secs: u64, layer_size_mb: f64) -> f64 {
+    if elapsed_secs > 10 {
+        let time_factor = elapsed_secs as f64 / (layer_size_mb / 8.0);
+        ((time_factor / (1.0 + time_factor)) * 100.0).min(95.0)
+    } else {
+        10.0 // Assume 10% in first 10 seconds
+    }
+}
+
+/// Creates a progress tracking task for large layer uploads
+fn create_progress_tracker(
+    layer_size_mb: f64,
+    layer_size_bytes: u64,
+    network_start: std::time::Instant,
+    digest: &str,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if layer_size_mb <= LARGE_LAYER_THRESHOLD_MB {
+        return None;
+    }
+
+    let layer_size_mb_clone = layer_size_mb;
+    let network_start_clone = network_start;
+    let digest_suffix = digest.chars().skip(digest.len() - 8).collect::<String>();
+    let interval_secs = if layer_size_mb > 1000.0 { 
+        LARGE_LAYER_PROGRESS_INTERVAL_SECS 
+    } else { 
+        NORMAL_LAYER_PROGRESS_INTERVAL_SECS 
+    };
+
+    Some(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+        let mut progress_counter = 1;
+        
+        loop {
+            interval.tick().await;
+            let elapsed = network_start_clone.elapsed();
+            
+            if elapsed.as_secs() > 0 {
+                let elapsed_min = elapsed.as_secs_f64() / 60.0;
+                let estimated_progress_percent = calculate_upload_progress(elapsed.as_secs(), layer_size_mb_clone);
+                
+                let estimated_transferred_mb = (estimated_progress_percent / 100.0) * layer_size_mb_clone;
+                let estimated_remaining_mb = layer_size_mb_clone - estimated_transferred_mb;
+                let estimated_transferred_bytes = (estimated_progress_percent / 100.0) * layer_size_bytes as f64;
+
+                let current_speed_mbps = if elapsed.as_secs() > 5 {
+                    estimated_transferred_mb / elapsed.as_secs_f64()
+                } else {
+                    ESTIMATED_SPEED_MBPS
+                };
+
+                let remaining_time_min = if current_speed_mbps > 0.0 {
+                    estimated_remaining_mb / current_speed_mbps / 60.0
+                } else {
+                    0.0
+                };
+
+                let (transferred_display, unit) = format_size_display(estimated_transferred_mb);
+                let (total_display, _) = format_size_display(layer_size_mb_clone);
+
+                println!("   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: ~{:.1} MB/s | ETA: {:.1}min", 
+                    progress_counter,
+                    estimated_progress_percent,
+                    transferred_display,
+                    total_display,
+                    unit,
+                    current_speed_mbps,
+                    remaining_time_min);
+
+                // Show detailed information periodically
+                if progress_counter % 2 == 0 {
+                    println!("   📊 Data transferred: {:.0}/{} bytes | Elapsed: {:.1}min | Layer: ...{}", 
+                        estimated_transferred_bytes,
+                        layer_size_bytes,
+                        elapsed_min,
+                        digest_suffix);
+                }
+
+                // Show network analysis for very large layers
+                if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
+                    let gb_size = layer_size_mb_clone / 1024.0;
+                    let avg_speed = estimated_transferred_mb / elapsed.as_secs_f64();
+                    let completion_percent = ((estimated_transferred_mb / layer_size_mb_clone) * 100.0).min(95.0);
+                    
+                    println!("   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress", 
+                        gb_size, avg_speed, completion_percent);
+                }
+
+                progress_counter += 1;
+            }
+        }
+    }))
+}
+
+/// Uploads a large layer with progress tracking and optimization
+async fn upload_large_layer(
+    client: &Client,
+    target_ref: &Reference,
+    layer_path: &std::path::Path,
+    digest: &str,
+    layer_size_mb: f64,
+) -> Result<(), PusherError> {
+    println!("   🔄 Streaming large layer ({:.1} MB) directly to registry...", layer_size_mb);
+    
+    let upload_start = std::time::Instant::now();
+    let layer_data = tokio::fs::read(layer_path).await.map_err(|e| {
+        PusherError::CacheError(format!("Failed to read cached layer {}: {}", digest, e))
+    })?;
+
+    let read_duration = upload_start.elapsed();
+    println!("   📖 File read completed in {:.1}s ({:.1} MB)", 
+        read_duration.as_secs_f64(),
+        layer_data.len() as f64 / (1024.0 * 1024.0)
+    );
+
+    // Show estimated time for very large layers
+    if layer_size_mb > 1000.0 {
+        let estimated_time_min = layer_size_mb / ESTIMATED_SPEED_MBPS / 60.0;
+        println!("   ⏱️  Estimated upload time: {:.1}-{:.1} minutes", 
+            estimated_time_min * 0.5, estimated_time_min * 2.0);
+    }
+
+    let network_start = std::time::Instant::now();
+    let progress_handle = create_progress_tracker(
+        layer_size_mb, 
+        layer_data.len() as u64, 
+        network_start, 
+        digest
+    );
+
+    // Perform the actual upload
+    let upload_result = client.push_blob(target_ref, &layer_data, digest).await;
+
+    // Cancel progress tracking
+    if let Some(handle) = progress_handle {
+        handle.abort();
+    }
+
+    upload_result.map_err(|e| {
+        PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
+    })?;
+
+    let network_duration = network_start.elapsed();
+    let total_duration = upload_start.elapsed();
+    let upload_speed = if network_duration.as_secs() > 0 {
+        (layer_data.len() as f64 / (1024.0 * 1024.0)) / network_duration.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    println!("   ⚡ Upload completed! Total: {:.1}s (read: {:.1}s, upload: {:.1}s) @ {:.1} MB/s",
+        total_duration.as_secs_f64(),
+        read_duration.as_secs_f64(),
+        network_duration.as_secs_f64(),
+        upload_speed
+    );
+
+    // Additional success details for very large uploads
+    if layer_size_mb > 1000.0 {
+        let gb_transferred = layer_size_mb / 1024.0;
+        println!("   🎉 Successfully transferred {:.2} GB in {:.1} minutes",
+            gb_transferred, network_duration.as_secs_f64() / 60.0);
+    }
+
+    Ok(())
+}
+
+/// Uploads a small layer with simple timing
+async fn upload_small_layer(
+    client: &Client,
+    target_ref: &Reference,
+    layer_path: &std::path::Path,
+    digest: &str,
+    layer_size_mb: f64,
+) -> Result<(), PusherError> {
+    println!("   📤 Uploading layer directly...");
+    
+    let read_start = std::time::Instant::now();
+    let layer_data = tokio::fs::read(layer_path).await.map_err(|e| {
+        PusherError::CacheError(format!("Failed to read cached layer {}: {}", digest, e))
+    })?;
+
+    let read_duration = read_start.elapsed();
+    let upload_start = std::time::Instant::now();
+
+    client.push_blob(target_ref, &layer_data, digest).await.map_err(|e| {
+        PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
+    })?;
+
+    let upload_duration = upload_start.elapsed();
+    let total_duration = read_start.elapsed();
+    let speed = if total_duration.as_secs() > 0 {
+        layer_size_mb / total_duration.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    println!("   ⚡ Completed in {:.1}s (read: {:.1}ms, upload: {:.1}s) @ {:.1} MB/s",
+        total_duration.as_secs_f64(),
+        read_duration.as_millis(),
+        upload_duration.as_secs_f64(),
+        speed
+    );
+
+    Ok(())
+}
+
+/// Shows extraction progress for large layers
+fn show_extraction_progress(total_read: u64, layer_size: u64, layer_size_mb: f64, extract_start: std::time::Instant) {
+    let progress = (total_read as f64 / layer_size as f64) * 100.0;
+    let elapsed = extract_start.elapsed();
+    let mb_per_sec = if elapsed.as_secs() > 0 {
+        (total_read as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    println!(
+        "   📊 Progress: {:.1}% ({:.1}/{:.1} MB) @ {:.1} MB/s",
+        progress,
+        total_read as f64 / (1024.0 * 1024.0),
+        layer_size_mb,
+        mb_per_sec
+    );
 }
 
 /// Imports a Docker tar archive and caches it using the same structure as pulled images
@@ -718,7 +779,7 @@ async fn import_tar_file(tar_path: &str, image_name: &str) -> Result<(), PusherE
         .map_err(|e| PusherError::TarError(format!("Failed to read tar entries: {}", e)))?;
 
     // Step 2: Create cache directory structure
-    let cache_dir = Path::new(".cache");
+    let cache_dir = Path::new(CACHE_DIR);
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| PusherError::CacheError(format!("Failed to create cache directory: {}", e)))?;
 
@@ -847,7 +908,7 @@ async fn import_tar_file(tar_path: &str, image_name: &str) -> Result<(), PusherE
 
                 // Stream layer data to temp file while computing hash
                 let mut hasher = Sha256::new();
-                let mut buffer = [0u8; 65536]; // 64KB buffer for streaming
+                let mut buffer = [0u8; STREAM_BUFFER_SIZE];
                 let mut total_read = 0u64;
                 let mut last_progress_time = std::time::Instant::now();
 
@@ -867,29 +928,13 @@ async fn import_tar_file(tar_path: &str, image_name: &str) -> Result<(), PusherE
 
                     // Update hash
                     hasher.update(&buffer[..bytes_read]);
-
                     total_read += bytes_read as u64;
 
                     // Progress indication for large layers with timing
-                    if layer_size > 10 * 1024 * 1024 && // Only for layers > 10MB
-                       last_progress_time.elapsed() > std::time::Duration::from_secs(2)
+                    if layer_size > LARGE_LAYER_THRESHOLD_BYTES && 
+                       last_progress_time.elapsed() > std::time::Duration::from_secs(PROGRESS_UPDATE_INTERVAL_SECS)
                     {
-                        // Update every 2 seconds
-                        let progress = (total_read as f64 / layer_size as f64) * 100.0;
-                        let elapsed = extract_start.elapsed();
-                        let mb_per_sec = if elapsed.as_secs() > 0 {
-                            (total_read as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64()
-                        } else {
-                            0.0
-                        };
-
-                        println!(
-                            "   📊 Progress: {:.1}% ({:.1}/{:.1} MB) @ {:.1} MB/s",
-                            progress,
-                            total_read as f64 / (1024.0 * 1024.0),
-                            layer_size_mb,
-                            mb_per_sec
-                        );
+                        show_extraction_progress(total_read, layer_size, layer_size_mb, extract_start);
                         last_progress_time = std::time::Instant::now();
                     }
                 }

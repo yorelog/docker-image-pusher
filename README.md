@@ -1,5 +1,10 @@
 # Docker Image Pusher
 
+[![Build Status](https://github.com/yorelog/docker-image-pusher/workflows/Build/badge.svg)](https://github.com/yorelog/docker-image-pusher/actions)
+[![Crates.io](https://img.shields.io/crates/v/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
+[![Downloads](https://img.shields.io/crates/d/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
+[![License](https://img.shields.io/github/license/yorelog/docker-image-pusher)](https://github.com/yorelog/docker-image-pusher)
+
 A memory-optimized Docker image transfer tool designed to handle large Docker images without excessive memory usage. This tool addresses the common problem of memory exhaustion when pulling or pushing multi-gigabyte Docker images.
 
 ## 🎯 Problem Statement
@@ -28,15 +33,53 @@ This tool implements **streaming-based layer processing** using the OCI client l
 
 ## 🛠️ Installation
 
-### From Source
+### Download Pre-built Binaries (Recommended)
+
+Download the latest compiled binaries from [GitHub Releases](https://github.com/yorelog/docker-image-pusher/releases):
+
+**Available Platforms:**
+- `docker-image-pusher-linux-x86_64` - Linux 64-bit
+- `docker-image-pusher-macos-x86_64` - macOS Intel
+- `docker-image-pusher-macos-aarch64` - macOS Apple Silicon (M1/M2)
+- `docker-image-pusher-windows-x86_64.exe` - Windows 64-bit
+
+**Installation Steps:**
+
+1. Visit the [Releases page](https://github.com/yorelog/docker-image-pusher/releases)
+2. Download the binary for your platform from the latest release
+3. Make it executable and add to PATH:
 
 ```bash
-git clone <repository-url>
+# Linux/macOS
+chmod +x docker-image-pusher-*
+sudo mv docker-image-pusher-* /usr/local/bin/docker-image-pusher
+
+# Windows
+# Move docker-image-pusher-windows-x86_64.exe to a directory in your PATH
+# Rename to docker-image-pusher.exe if desired
+```
+
+### Install from Crates.io
+
+Install directly using Cargo from the official Rust package registry:
+
+```bash
+cargo install docker-image-pusher
+```
+
+This will compile and install the latest published version from [crates.io](https://crates.io/crates/docker-image-pusher).
+
+### From Source
+
+For development or customization:
+
+```bash
+git clone https://github.com/yorelog/docker-image-pusher
 cd docker-image-pusher
 cargo build --release
 ```
 
-The compiled binary will be available at `target/release/docker-image-pusher.exe`
+The compiled binary will be available at `target/release/docker-image-pusher` (or `.exe` on Windows)
 
 ## 📖 Usage
 

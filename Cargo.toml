@@ -1,7 +1,7 @@
 [package]
 name = "docker-image-pusher"
-version = "0.1.0"
-edition = "2021"
+version = "0.3.3"
+edition = "2024"
 authors = ["yorelog <yorelog@gmail.com>"]
 description = "A memory-optimized Docker image transfer tool for handling large images efficiently"
 readme = "README.md"

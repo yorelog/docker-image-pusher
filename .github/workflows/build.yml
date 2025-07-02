@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [ dev ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ dev ]
 
@@ -141,35 +142,51 @@ jobs:
           
           This release includes statically-linked binaries for multiple platforms with no external dependencies.
           
-          ### Features
-          - Memory-optimized streaming for large Docker images (>10GB support)
-          - Import Docker tar archives created by `docker save`
-          - Push images directly to OCI registries
-          - Chunked layer processing to prevent memory exhaustion
-          - Authentication support with Docker registries
-          - Real-time progress tracking
-          - Cross-platform compatibility with no external dependencies
+          ### 🚀 New Features in v0.3.4
+          - **Smart Media Type Detection**: Automatically detects layer compression format (gzip vs uncompressed)
+          - **Enhanced Code Quality**: Refactored codebase with better organization and maintainability
+          - **Improved Error Handling**: Added convenience methods for consistent error management
+          - **Optimized Progress Tracking**: Better performance monitoring for large layer uploads
+          - **Memory Efficiency**: Enhanced streaming performance with configurable constants
           
-          ### Usage
-          **Push cached image:**
+          ### 🔧 Technical Improvements
+          - Fixed hardcoded media type issue (now correctly identifies Docker layer formats)
+          - Modularized upload functions for better code organization
+          - Added comprehensive configuration constants
+          - Upgraded to Rust edition 2024
+          - Improved CI/CD workflow
+          - Enhanced documentation and code comments
+          
+          ### 🐛 Bug Fixes
+          - Media type detection now works with all Docker layer formats
+          - More robust error handling throughout the codebase
+          - Fixed edge cases in layer processing
+          
+          ### Usage Examples
+          
+          **Pull and Push workflow:**
           ```bash
-          ./docker-image-pusher push \
-            --registry-url https://your-registry.com \
-            --username your-username \
-            --password your-password \
-            --image-name myapp:latest
+          # Pull image from source registry
+          ./docker-image-pusher pull nginx:latest
+          
+          # Push to target registry
+          ./docker-image-pusher push nginx:latest registry.example.com/nginx:latest \\
+            --username your-username --password your-password
           ```
           
           **Import Docker tar:**
           ```bash
-          ./docker-image-pusher import \
-            --tar-file /path/to/image.tar \
-            --image-name myapp:latest
+          # Import from docker save output
+          ./docker-image-pusher import myapp.tar myapp:latest
+          
+          # Then push to registry
+          ./docker-image-pusher push myapp:latest registry.example.com/myapp:latest \\
+            --username your-username --password your-password
           ```
           
           ### Download Instructions
           - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-musl) - statically linked
-          - **Linux ARM64**: `docker-image-pusher` (aarch64-unknown-linux-musl) - statically linked
+          - **Linux ARM64**: `docker-image-pusher` (aarch64-unknown-linux-musl) - statically linked  
           - **Windows x64**: `docker-image-pusher.exe` (x86_64-pc-windows-msvc)
           - **macOS Intel**: `docker-image-pusher` (x86_64-apple-darwin)
           - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)

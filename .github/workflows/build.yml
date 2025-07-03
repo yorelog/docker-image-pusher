@@ -42,11 +42,11 @@ jobs:
           # Linux builds - focus on musl for static linking
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            binary_name: docker-image-pusher
+            binary_name: docker-image-pusher-linux-x86_64
             cross: false
           - os: ubuntu-latest  
             target: aarch64-unknown-linux-musl
-            binary_name: docker-image-pusher
+            binary_name: docker-image-pusher-linux-aarch64
             cross: true
           
           # Windows builds
@@ -58,11 +58,11 @@ jobs:
           # macOS builds (statically linked by default)
           - os: macos-latest
             target: x86_64-apple-darwin
-            binary_name: docker-image-pusher
+            binary_name: docker-image-pusher-darwin-x86_64
             cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary_name: docker-image-pusher
+            binary_name: docker-image-pusher-darwin-aarch64
             cross: false
 
     runs-on: ${{ matrix.os }}

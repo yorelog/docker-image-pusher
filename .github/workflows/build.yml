@@ -132,11 +132,11 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          artifacts/docker-image-pusher-x86_64-unknown-linux-musl/docker-image-pusher
-          artifacts/docker-image-pusher-aarch64-unknown-linux-musl/docker-image-pusher
+          artifacts/docker-image-pusher-x86_64-unknown-linux-musl/docker-image-pusher-linux-x86_64
+          artifacts/docker-image-pusher-aarch64-unknown-linux-musl/docker-image-pusher-linux-aarch64
           artifacts/docker-image-pusher-x86_64-pc-windows-msvc/docker-image-pusher.exe
-          artifacts/docker-image-pusher-x86_64-apple-darwin/docker-image-pusher
-          artifacts/docker-image-pusher-aarch64-apple-darwin/docker-image-pusher
+          artifacts/docker-image-pusher-x86_64-apple-darwin/docker-image-pusher-darwin-x86_64
+          artifacts/docker-image-pusher-aarch64-apple-darwin/docker-image-pusher-darwin-aarch64
         body: |
           ## Docker Image Pusher ${{ github.ref_name }}
           
@@ -185,11 +185,11 @@ jobs:
           ```
           
           ### Download Instructions
-          - **Linux x64**: `docker-image-pusher` (x86_64-unknown-linux-musl) - statically linked
-          - **Linux ARM64**: `docker-image-pusher` (aarch64-unknown-linux-musl) - statically linked  
+          - **Linux x64**: `docker-image-pusher-linux-x86_64` (x86_64-unknown-linux-musl) - statically linked
+          - **Linux ARM64**: `docker-image-pusher-linux-aarch64 (aarch64-unknown-linux-musl) - statically linked  
           - **Windows x64**: `docker-image-pusher.exe` (x86_64-pc-windows-msvc)
-          - **macOS Intel**: `docker-image-pusher` (x86_64-apple-darwin)
-          - **macOS Apple Silicon**: `docker-image-pusher` (aarch64-apple-darwin)
+          - **macOS Intel**: `docker-image-pusher-darwin-x86_64` (x86_64-apple-darwin)
+          - **macOS Apple Silicon**: `docker-image-pusher-darwin-aarch64` (aarch64-apple-darwin)
         draft: false
         prerelease: false
       env:

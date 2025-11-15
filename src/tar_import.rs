@@ -172,6 +172,7 @@ impl TarImporter {
         let mut config_data: Option<(String, Vec<u8>)> = None;
         let mut path_to_digest: HashMap<String, String> = HashMap::new();
         let mut layer_files: HashMap<String, LayerFile> = HashMap::new();
+        let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
 
         for entry_result in archive
             .entries()
@@ -217,7 +218,6 @@ impl TarImporter {
                 .map_err(|e| PusherError::TarError(format!("Failed to create temp file: {}", e)))?;
 
             let mut hasher = Sha256::new();
-            let mut buffer = [0u8; STREAM_BUFFER_SIZE];
             let mut total_read = 0u64;
             let mut last_progress_time = Instant::now();
 

@@ -1,6 +1,6 @@
 [package]
 name = "docker-image-pusher"
-version = "0.3.4"
+version = "0.5.0"
 edition = "2024"
 authors = ["yorelog <yorelog@gmail.com>"]
 description = "A memory-optimized Docker image transfer tool for handling large images efficiently"
@@ -13,7 +13,7 @@ documentation = "https://github.com/yorelog/docker-image-pusher/blob/main/README
 
 [dependencies]
 # Core async runtime with filesystem support
-tokio = { version = "1.45", features = ["rt-multi-thread", "fs", "io-util"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "fs", "io-util"] }
 
 # Futures utilities for concurrent processing
 futures = "0.3"
@@ -30,12 +30,16 @@ thiserror = "2.0"
 
 # JSON serialization for manifests and metadata
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 
 # For parsing Docker tar archives
 tar = "0.4"
-flate2 = "1.0"
+flate2 = "1.1"
 
 # For computing file digests
 sha2 = "0.10"
+
+[patch.crates-io]
+oci-client = { path = "vendor/oci-client-0.15.0" }
 
 

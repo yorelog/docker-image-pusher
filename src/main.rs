@@ -43,7 +43,6 @@ The tool operates in two main phases:
 - Size-based upload strategies for optimal performance
 */
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 use oci_client::manifest::OciImageManifest;
 use oci_client::{Client, Reference};
@@ -54,16 +53,20 @@ use std::io::{Read, Write};
 use std::path::Path;
 use tar::Archive;
 use thiserror::Error;
+use tokio::io::BufReader;
 
 mod cache;
 mod image;
+mod state;
 
 // Constants for better code maintainability
 const CACHE_DIR: &str = ".cache";
-const LARGE_LAYER_THRESHOLD_MB: f64 = 100.0;
+const LARGE_LAYER_THRESHOLD_MB: f64 = 1024.0; // 1GB threshold for chunked uploads
 const MEDIUM_LAYER_THRESHOLD_MB: f64 = 50.0;
-const LARGE_LAYER_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10MB for progress tracking
+const LARGE_LAYER_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024; // 1GB threshold for chunked uploads
+const PROGRESS_LAYER_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024; // 10MB for progress tracking
 const STREAM_BUFFER_SIZE: usize = 65536; // 64KB buffer
+const CHUNKED_LAYER_SIZE_BYTES: usize = 100 * 1024 * 1024; // 100MB chunk size
 const PROGRESS_UPDATE_INTERVAL_SECS: u64 = 2;
 const RATE_LIMIT_DELAY_MS: u64 = 200;
 
@@ -103,7 +106,7 @@ pub enum PusherError {
     /// JSON serialization/deserialization errors
     #[error("Serde error: {0}")]
     SerdeError(#[from] serde_json::Error),
-    
+
     /// Error when requested cached image is not found
     #[error("Cache not found")]
     CacheNotFound,
@@ -161,17 +164,36 @@ enum Commands {
     /// Reads a previously cached image and uploads it to the specified
     /// target registry with authentication.
     Push {
-        /// Source image name (must be previously cached)
-        source_image: String,
+        /// Source image name (cached) or path to a Docker tar archive
+        input: String,
 
-        /// Target image to push to (full registry path with tag)
-        target_image: String,
+        /// Target image to push to (full registry path with tag). Optional when pushing from tar.
+        #[arg(short = 't', long = "target")]
+        target_image: Option<String>,
 
         /// Username for target registry authentication
         #[arg(short, long)]
-        username: String,
+        username: Option<String>,
 
         /// Password for target registry authentication  
+        #[arg(short, long)]
+        password: Option<String>,
+
+        /// Override registry host when inferring target from a tar archive
+        #[arg(long = "registry")]
+        registry_override: Option<String>,
+    },
+
+    /// Store credentials for a registry to reuse during push operations
+    Login {
+        /// Registry host (e.g. registry.example.com)
+        registry: String,
+
+        /// Username for the registry
+        #[arg(short, long)]
+        username: String,
+
+        /// Password for the registry
         #[arg(short, long)]
         password: String,
     },
@@ -194,7 +216,7 @@ enum Commands {
 /// Initializes the OCI client with a platform resolver for Linux AMD64 images
 /// and dispatches to the appropriate command handler based on user input.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), PusherError> {
     let cli = Cli::parse();
 
     // Configure OCI client with platform resolver to handle multi-platform images
@@ -209,25 +231,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("✅ Successfully cached image: {}", source_image);
         }
         Commands::Push {
-            source_image,
+            input,
             target_image,
             username,
             password,
+            registry_override,
         } => {
-            println!(
-                "📤 Pushing image from cache: {} -> {}",
-                source_image, target_image
-            );
+            let input_path = Path::new(&input);
+            let is_tar_source = input_path.is_file();
+            let mut inferred_target = target_image;
 
-            // Ensure we have the image cached before attempting to push
-            if !cache::has_cached_image(&source_image).await? {
-                println!("⚠️  Image not found in cache, pulling first...");
-                cache::cache_image(&client, &source_image).await?;
+            if is_tar_source {
+                println!("📦 Preparing to push Docker archive: {}", input);
+                let info = tar_repo_info_from_path(&input)?;
+                if inferred_target.is_none() {
+                    if let Some(history_target) = infer_target_from_history(&info).await? {
+                        inferred_target = Some(history_target);
+                    } else {
+                        let fallback = build_target_from_tar(&info, registry_override.as_deref());
+                        println!(
+                            "💡 No recent history matched. Using target derived from tar metadata: {}",
+                            fallback
+                        );
+                        inferred_target = Some(fallback);
+                    }
+                }
+            } else {
+                println!("📤 Pushing cached image: {}", input);
             }
 
-            // Push the cached image to target registry
-            push_cached_image(&client, &source_image, &target_image, &username, &password).await?;
-            println!("✅ Successfully pushed image: {}", target_image);
+            if inferred_target.is_none() {
+                return Err(PusherError::PushError(
+                    "Unable to determine target image. Provide --target or ensure the tar archive contains RepoTags.".to_string(),
+                ));
+            }
+
+            let final_target = inferred_target.unwrap();
+            println!("🎯 Target image resolved as: {}", final_target);
+
+            let target_ref: Reference = final_target.parse().map_err(|e| {
+                PusherError::PushError(format!("Invalid target image reference: {}", e))
+            })?;
+            let registry_host = target_ref.resolve_registry().to_string();
+            let (resolved_username, resolved_password) =
+                resolve_credentials(username, password, &registry_host).await?;
+
+            let source_cache_key = if is_tar_source {
+                let cache_name = image::sanitize_image_name(&final_target);
+                println!("🧩 Importing tar archive into cache entry: {}", cache_name);
+                import_tar_file(&input, &cache_name).await?;
+                cache_name
+            } else {
+                if !cache::has_cached_image(&input).await? {
+                    println!("⚠️  Image not found in cache, pulling first...");
+                    cache::cache_image(&client, &input).await?;
+                }
+                input
+            };
+
+            push_cached_image(
+                &client,
+                &source_cache_key,
+                &final_target,
+                &resolved_username,
+                &resolved_password,
+            )
+            .await?;
+            state::record_push_target(&final_target).await?;
+            println!("✅ Successfully pushed image: {}", final_target);
+        }
+        Commands::Login {
+            registry,
+            username,
+            password,
+        } => {
+            state::store_credentials(&registry, &username, &password).await?;
+            println!("🔐 Stored credentials for registry {}", registry);
         }
         Commands::Import {
             tar_file,
@@ -372,7 +451,8 @@ async fn push_cached_image(
         let layer_metadata = tokio::fs::metadata(&layer_path).await.map_err(|e| {
             PusherError::CacheError(format!("Failed to get layer metadata {}: {}", digest, e))
         })?;
-        let layer_size_mb = layer_metadata.len() as f64 / (1024.0 * 1024.0);
+        let layer_size_bytes = layer_metadata.len();
+        let layer_size_mb = layer_size_bytes as f64 / (1024.0 * 1024.0);
 
         println!(
             "📦 Uploading layer {}/{}: {} ({:.1} MB)",
@@ -392,14 +472,22 @@ async fn push_cached_image(
             skipped_uploads += 1;
             continue;
         } // MEMORY OPTIMIZATION: Different strategies based on layer size
-        if layer_size_mb > LARGE_LAYER_THRESHOLD_MB {
-            upload_large_layer(client, &target_ref, &layer_path, digest, layer_size_mb).await?;
+        if layer_size_bytes >= LARGE_LAYER_THRESHOLD_BYTES {
+            upload_large_layer(
+                client,
+                &target_ref,
+                &layer_path,
+                digest,
+                layer_size_mb,
+                layer_size_bytes,
+            )
+            .await?;
         } else {
             upload_small_layer(client, &target_ref, &layer_path, digest, layer_size_mb).await?;
         }
-        
+
         println!("   ✅ Successfully uploaded layer {}", digest);
-        
+
         // Rate limiting: Add delay for large layers to prevent overwhelming the registry
         if layer_size_mb > MEDIUM_LAYER_THRESHOLD_MB {
             tokio::time::sleep(tokio::time::Duration::from_millis(RATE_LIMIT_DELAY_MS)).await;
@@ -466,14 +554,15 @@ async fn push_cached_image(
 /// `Result<String, PusherError>` - The detected media type
 fn detect_layer_media_type(layer_path: &std::path::Path) -> Result<String, PusherError> {
     use std::io::Read;
-    
+
     let mut file = std::fs::File::open(layer_path)
         .map_err(|e| PusherError::tar_error(format!("Failed to open layer file: {}", e)))?;
-    
+
     let mut buffer = [0u8; 2];
-    let bytes_read = file.read(&mut buffer)
+    let bytes_read = file
+        .read(&mut buffer)
         .map_err(|e| PusherError::tar_error(format!("Failed to read layer header: {}", e)))?;
-    
+
     if bytes_read >= 2 && buffer == GZIP_MAGIC_BYTES {
         Ok("application/vnd.docker.image.rootfs.diff.tar.gzip".to_string())
     } else if bytes_read >= 2 {
@@ -517,27 +606,30 @@ fn create_progress_tracker(
     let layer_size_mb_clone = layer_size_mb;
     let network_start_clone = network_start;
     let digest_suffix = digest.chars().skip(digest.len() - 8).collect::<String>();
-    let interval_secs = if layer_size_mb > 1000.0 { 
-        LARGE_LAYER_PROGRESS_INTERVAL_SECS 
-    } else { 
-        NORMAL_LAYER_PROGRESS_INTERVAL_SECS 
+    let interval_secs = if layer_size_mb > 1000.0 {
+        LARGE_LAYER_PROGRESS_INTERVAL_SECS
+    } else {
+        NORMAL_LAYER_PROGRESS_INTERVAL_SECS
     };
 
     Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
         let mut progress_counter = 1;
-        
+
         loop {
             interval.tick().await;
             let elapsed = network_start_clone.elapsed();
-            
+
             if elapsed.as_secs() > 0 {
                 let elapsed_min = elapsed.as_secs_f64() / 60.0;
-                let estimated_progress_percent = calculate_upload_progress(elapsed.as_secs(), layer_size_mb_clone);
-                
-                let estimated_transferred_mb = (estimated_progress_percent / 100.0) * layer_size_mb_clone;
+                let estimated_progress_percent =
+                    calculate_upload_progress(elapsed.as_secs(), layer_size_mb_clone);
+
+                let estimated_transferred_mb =
+                    (estimated_progress_percent / 100.0) * layer_size_mb_clone;
                 let estimated_remaining_mb = layer_size_mb_clone - estimated_transferred_mb;
-                let estimated_transferred_bytes = (estimated_progress_percent / 100.0) * layer_size_bytes as f64;
+                let estimated_transferred_bytes =
+                    (estimated_progress_percent / 100.0) * layer_size_bytes as f64;
 
                 let current_speed_mbps = if elapsed.as_secs() > 5 {
                     estimated_transferred_mb / elapsed.as_secs_f64()
@@ -554,32 +646,36 @@ fn create_progress_tracker(
                 let (transferred_display, unit) = format_size_display(estimated_transferred_mb);
                 let (total_display, _) = format_size_display(layer_size_mb_clone);
 
-                println!("   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: ~{:.1} MB/s | ETA: {:.1}min", 
+                println!(
+                    "   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: ~{:.1} MB/s | ETA: {:.1}min",
                     progress_counter,
                     estimated_progress_percent,
                     transferred_display,
                     total_display,
                     unit,
                     current_speed_mbps,
-                    remaining_time_min);
+                    remaining_time_min
+                );
 
                 // Show detailed information periodically
                 if progress_counter % 2 == 0 {
-                    println!("   📊 Data transferred: {:.0}/{} bytes | Elapsed: {:.1}min | Layer: ...{}", 
-                        estimated_transferred_bytes,
-                        layer_size_bytes,
-                        elapsed_min,
-                        digest_suffix);
+                    println!(
+                        "   📊 Data transferred: {:.0}/{} bytes | Elapsed: {:.1}min | Layer: ...{}",
+                        estimated_transferred_bytes, layer_size_bytes, elapsed_min, digest_suffix
+                    );
                 }
 
                 // Show network analysis for very large layers
                 if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
                     let gb_size = layer_size_mb_clone / 1024.0;
                     let avg_speed = estimated_transferred_mb / elapsed.as_secs_f64();
-                    let completion_percent = ((estimated_transferred_mb / layer_size_mb_clone) * 100.0).min(95.0);
-                    
-                    println!("   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress", 
-                        gb_size, avg_speed, completion_percent);
+                    let completion_percent =
+                        ((estimated_transferred_mb / layer_size_mb_clone) * 100.0).min(95.0);
+
+                    println!(
+                        "   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress",
+                        gb_size, avg_speed, completion_percent
+                    );
                 }
 
                 progress_counter += 1;
@@ -588,74 +684,73 @@ fn create_progress_tracker(
     }))
 }
 
-/// Uploads a large layer with progress tracking and optimization
+/// Uploads a large layer with chunked streaming to avoid loading it into memory
 async fn upload_large_layer(
     client: &Client,
     target_ref: &Reference,
     layer_path: &std::path::Path,
     digest: &str,
     layer_size_mb: f64,
+    layer_size_bytes: u64,
 ) -> Result<(), PusherError> {
-    println!("   🔄 Streaming large layer ({:.1} MB) directly to registry...", layer_size_mb);
-    
-    let upload_start = std::time::Instant::now();
-    let layer_data = tokio::fs::read(layer_path).await.map_err(|e| {
-        PusherError::CacheError(format!("Failed to read cached layer {}: {}", digest, e))
-    })?;
-
-    let read_duration = upload_start.elapsed();
-    println!("   📖 File read completed in {:.1}s ({:.1} MB)", 
-        read_duration.as_secs_f64(),
-        layer_data.len() as f64 / (1024.0 * 1024.0)
+    println!(
+        "   🔄 Chunk-streaming large layer ({:.1} MB) in {:.0} MB chunks...",
+        layer_size_mb,
+        CHUNKED_LAYER_SIZE_BYTES as f64 / (1024.0 * 1024.0)
     );
 
-    // Show estimated time for very large layers
+    let upload_start = std::time::Instant::now();
+    let file = tokio::fs::File::open(layer_path).await.map_err(|e| {
+        PusherError::CacheError(format!("Failed to open cached layer {}: {}", digest, e))
+    })?;
+    let mut reader = BufReader::with_capacity(CHUNKED_LAYER_SIZE_BYTES, file);
+
     if layer_size_mb > 1000.0 {
         let estimated_time_min = layer_size_mb / ESTIMATED_SPEED_MBPS / 60.0;
-        println!("   ⏱️  Estimated upload time: {:.1}-{:.1} minutes", 
-            estimated_time_min * 0.5, estimated_time_min * 2.0);
+        println!(
+            "   ⏱️  Estimated upload time: {:.1}-{:.1} minutes",
+            estimated_time_min * 0.5,
+            estimated_time_min * 2.0
+        );
     }
 
     let network_start = std::time::Instant::now();
-    let progress_handle = create_progress_tracker(
-        layer_size_mb, 
-        layer_data.len() as u64, 
-        network_start, 
-        digest
-    );
+    let progress_handle =
+        create_progress_tracker(layer_size_mb, layer_size_bytes, network_start, digest);
 
-    // Perform the actual upload
-    let upload_result = client.push_blob(target_ref, &layer_data, digest).await;
+    let upload_result = client
+        .push_blob_stream(target_ref, &mut reader, digest, CHUNKED_LAYER_SIZE_BYTES)
+        .await;
 
-    // Cancel progress tracking
     if let Some(handle) = progress_handle {
         handle.abort();
     }
 
-    upload_result.map_err(|e| {
-        PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
-    })?;
+    upload_result
+        .map_err(|e| PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e)))?;
 
     let network_duration = network_start.elapsed();
     let total_duration = upload_start.elapsed();
     let upload_speed = if network_duration.as_secs() > 0 {
-        (layer_data.len() as f64 / (1024.0 * 1024.0)) / network_duration.as_secs_f64()
+        (layer_size_bytes as f64 / (1024.0 * 1024.0)) / network_duration.as_secs_f64()
     } else {
         0.0
     };
 
-    println!("   ⚡ Upload completed! Total: {:.1}s (read: {:.1}s, upload: {:.1}s) @ {:.1} MB/s",
+    println!(
+        "   ⚡ Chunked upload completed! Total: {:.1}s (upload: {:.1}s) @ {:.1} MB/s",
         total_duration.as_secs_f64(),
-        read_duration.as_secs_f64(),
         network_duration.as_secs_f64(),
         upload_speed
     );
 
-    // Additional success details for very large uploads
     if layer_size_mb > 1000.0 {
         let gb_transferred = layer_size_mb / 1024.0;
-        println!("   🎉 Successfully transferred {:.2} GB in {:.1} minutes",
-            gb_transferred, network_duration.as_secs_f64() / 60.0);
+        println!(
+            "   🎉 Successfully transferred {:.2} GB in {:.1} minutes",
+            gb_transferred,
+            network_duration.as_secs_f64() / 60.0
+        );
     }
 
     Ok(())
@@ -670,7 +765,7 @@ async fn upload_small_layer(
     layer_size_mb: f64,
 ) -> Result<(), PusherError> {
     println!("   📤 Uploading layer directly...");
-    
+
     let read_start = std::time::Instant::now();
     let layer_data = tokio::fs::read(layer_path).await.map_err(|e| {
         PusherError::CacheError(format!("Failed to read cached layer {}: {}", digest, e))
@@ -679,9 +774,10 @@ async fn upload_small_layer(
     let read_duration = read_start.elapsed();
     let upload_start = std::time::Instant::now();
 
-    client.push_blob(target_ref, &layer_data, digest).await.map_err(|e| {
-        PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
-    })?;
+    client
+        .push_blob(target_ref, &layer_data, digest)
+        .await
+        .map_err(|e| PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e)))?;
 
     let upload_duration = upload_start.elapsed();
     let total_duration = read_start.elapsed();
@@ -691,7 +787,8 @@ async fn upload_small_layer(
         0.0
     };
 
-    println!("   ⚡ Completed in {:.1}s (read: {:.1}ms, upload: {:.1}s) @ {:.1} MB/s",
+    println!(
+        "   ⚡ Completed in {:.1}s (read: {:.1}ms, upload: {:.1}s) @ {:.1} MB/s",
         total_duration.as_secs_f64(),
         read_duration.as_millis(),
         upload_duration.as_secs_f64(),
@@ -702,7 +799,12 @@ async fn upload_small_layer(
 }
 
 /// Shows extraction progress for large layers
-fn show_extraction_progress(total_read: u64, layer_size: u64, layer_size_mb: f64, extract_start: std::time::Instant) {
+fn show_extraction_progress(
+    total_read: u64,
+    layer_size: u64,
+    layer_size_mb: f64,
+    extract_start: std::time::Instant,
+) {
     let progress = (total_read as f64 / layer_size as f64) * 100.0;
     let elapsed = extract_start.elapsed();
     let mb_per_sec = if elapsed.as_secs() > 0 {
@@ -931,10 +1033,16 @@ async fn import_tar_file(tar_path: &str, image_name: &str) -> Result<(), PusherE
                     total_read += bytes_read as u64;
 
                     // Progress indication for large layers with timing
-                    if layer_size > LARGE_LAYER_THRESHOLD_BYTES && 
-                       last_progress_time.elapsed() > std::time::Duration::from_secs(PROGRESS_UPDATE_INTERVAL_SECS)
+                    if layer_size > PROGRESS_LAYER_THRESHOLD_BYTES
+                        && last_progress_time.elapsed()
+                            > std::time::Duration::from_secs(PROGRESS_UPDATE_INTERVAL_SECS)
                     {
-                        show_extraction_progress(total_read, layer_size, layer_size_mb, extract_start);
+                        show_extraction_progress(
+                            total_read,
+                            layer_size,
+                            layer_size_mb,
+                            extract_start,
+                        );
                         last_progress_time = std::time::Instant::now();
                     }
                 }
@@ -989,7 +1097,7 @@ async fn import_tar_file(tar_path: &str, image_name: &str) -> Result<(), PusherE
     println!(
         "✅ Successfully extracted {} layers and config",
         layer_mapping.len()
-    );    // Step 8: Create OCI-compatible manifest using file-based layer info
+    ); // Step 8: Create OCI-compatible manifest using file-based layer info
     let mut oci_layers = Vec::new();
     let mut cached_layers = Vec::new();
 
@@ -1060,4 +1168,178 @@ async fn import_tar_file(tar_path: &str, image_name: &str) -> Result<(), PusherE
     println!("💡 Cache structure matches pulled images - can be pushed with 'push' command");
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct TarRepoInfo {
+    registry: Option<String>,
+    repository: String,
+    image_name: String,
+    tag: String,
+}
+
+fn tar_repo_info_from_path(tar_path: &str) -> Result<TarRepoInfo, PusherError> {
+    let repo_tags = extract_repo_tags_from_tar(tar_path)?;
+    let repo_tag = repo_tags
+        .first()
+        .ok_or_else(|| PusherError::tar_error("No RepoTags entries found inside manifest.json"))?;
+    println!("📝 Tar archive RepoTag detected: {}", repo_tag);
+    parse_repo_tag(repo_tag)
+}
+
+fn extract_repo_tags_from_tar(tar_path: &str) -> Result<Vec<String>, PusherError> {
+    let tar_file = File::open(tar_path).map_err(|e| {
+        PusherError::tar_error(format!("Failed to open tar file {}: {}", tar_path, e))
+    })?;
+    let mut archive = Archive::new(tar_file);
+    for entry_result in archive
+        .entries()
+        .map_err(|e| PusherError::tar_error(format!("Failed to iterate tar entries: {}", e)))?
+    {
+        let mut entry = entry_result
+            .map_err(|e| PusherError::tar_error(format!("Failed to read tar entry: {}", e)))?;
+        let path = entry
+            .path()
+            .map_err(|e| PusherError::tar_error(format!("Failed to read tar entry path: {}", e)))?;
+        if path.to_string_lossy() == "manifest.json" {
+            let mut contents = Vec::new();
+            entry.read_to_end(&mut contents).map_err(|e| {
+                PusherError::tar_error(format!("Failed to read manifest.json: {}", e))
+            })?;
+            let manifest: serde_json::Value = serde_json::from_slice(&contents).map_err(|e| {
+                PusherError::tar_error(format!("Failed to parse manifest.json: {}", e))
+            })?;
+            let images = manifest.as_array().ok_or_else(|| {
+                PusherError::tar_error("manifest.json is not an array of image entries")
+            })?;
+            let mut tags = Vec::new();
+            for image in images {
+                if let Some(repo_tags) = image["RepoTags"].as_array() {
+                    for tag in repo_tags {
+                        if let Some(tag_str) = tag.as_str() {
+                            tags.push(tag_str.to_string());
+                        }
+                    }
+                }
+            }
+            if tags.is_empty() {
+                return Err(PusherError::tar_error(
+                    "manifest.json contains no RepoTags entries",
+                ));
+            }
+            return Ok(tags);
+        }
+    }
+
+    Err(PusherError::tar_error(
+        "manifest.json not found in provided tar archive",
+    ))
+}
+
+fn parse_repo_tag(repo_tag: &str) -> Result<TarRepoInfo, PusherError> {
+    let (repository_part, tag) = repo_tag.rsplit_once(':').ok_or_else(|| {
+        PusherError::tar_error(format!("RepoTag '{}' is missing a tag suffix", repo_tag))
+    })?;
+    if tag.is_empty() {
+        return Err(PusherError::tar_error(format!(
+            "RepoTag '{}' has an empty tag",
+            repo_tag
+        )));
+    }
+
+    let (registry, repository) = split_registry(repository_part);
+    let image_name = repository
+        .split('/')
+        .last()
+        .unwrap_or(repository.as_str())
+        .to_string();
+
+    Ok(TarRepoInfo {
+        registry,
+        repository,
+        image_name,
+        tag: tag.to_string(),
+    })
+}
+
+fn split_registry(repo: &str) -> (Option<String>, String) {
+    if let Some(slash_index) = repo.find('/') {
+        let candidate = &repo[..slash_index];
+        if candidate.contains('.') || candidate.contains(':') || candidate == "localhost" {
+            let remainder = repo[slash_index + 1..].to_string();
+            return (Some(candidate.to_string()), remainder);
+        }
+    }
+    (None, repo.to_string())
+}
+
+fn build_target_from_tar(info: &TarRepoInfo, registry_override: Option<&str>) -> String {
+    let registry_part = registry_override
+        .map(|value| value.trim_end_matches('/').to_string())
+        .or_else(|| info.registry.clone());
+    let repository = if let Some(registry) = registry_part {
+        format!("{}/{}", registry, info.repository)
+    } else {
+        info.repository.clone()
+    };
+    format!("{}:{}", repository, info.tag)
+}
+
+async fn infer_target_from_history(info: &TarRepoInfo) -> Result<Option<String>, PusherError> {
+    match state::recent_targets().await {
+        Ok(history) => {
+            for entry in history {
+                if let Some(candidate) = adjust_target_from_history(&entry, info) {
+                    println!(
+                        "💡 Using recent push history to derive target: {} (based on {})",
+                        candidate, entry
+                    );
+                    return Ok(Some(candidate));
+                }
+            }
+            Ok(None)
+        }
+        Err(err) => {
+            println!("⚠️  Unable to read push history: {}", err);
+            Ok(None)
+        }
+    }
+}
+
+fn adjust_target_from_history(previous: &str, info: &TarRepoInfo) -> Option<String> {
+    let (repo_without_tag, _) = previous.rsplit_once(':')?;
+    let new_repository = if let Some(last_slash) = repo_without_tag.rfind('/') {
+        let prefix = &repo_without_tag[..last_slash];
+        format!("{}/{}", prefix, info.image_name)
+    } else {
+        info.image_name.clone()
+    };
+    Some(format!("{}:{}", new_repository, info.tag))
+}
+
+async fn resolve_credentials(
+    username: Option<String>,
+    password: Option<String>,
+    registry: &str,
+) -> Result<(String, String), PusherError> {
+    match (username, password) {
+        (Some(user), Some(pass)) => Ok((user, pass)),
+        (Some(_), None) | (None, Some(_)) => Err(PusherError::push_error(
+            "Both username and password must be provided when using CLI flags",
+        )),
+        (None, None) => match state::load_credentials(registry).await {
+            Ok(Some((stored_user, stored_pass))) => {
+                println!("🔑 Using stored credentials for {}", registry);
+                Ok((stored_user, stored_pass))
+            }
+            Ok(None) => Err(PusherError::push_error(format!(
+                "Credentials for registry '{}' not found. Run 'login' or pass --username/--password",
+                registry
+            ))),
+            Err(err) => Err(PusherError::push_error(format!(
+                "Failed to load stored credentials: {}",
+                err
+            ))),
+        },
+    }
 }

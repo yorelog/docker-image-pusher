@@ -83,51 +83,37 @@ The compiled binary will be available at `target/release/docker-image-pusher` (o
 
 ## 📖 Usage
 
-### Basic Commands
+### Quick Start (two commands)
 
-#### Pull and Cache an Image
+1. **Login (once per registry)**
+    ```bash
+    docker-image-pusher login registry.example.com --username user --password pass
+    ```
+    Credentials are saved under `.cache/credentials.json` for reuse.
 
-```bash
-docker-image-pusher pull <source-image>
-```
+2. **Push a docker save tar directly**
+    ```bash
+    docker-image-pusher push ./nginx.tar
+    ```
+    - Create the tar with `docker save nginx:latest -o nginx.tar` (or any image you like).
+    - During `push`, the tool automatically combines the RepoTag inside the tar with the registry you just logged into (or the last five registries you pushed to) and prints something like `🎯 Target image resolved as: registry.example.com/tools/nginx:latest` before uploading. Pass `--registry other.example.com` if you need to override the destination host.
 
-**Examples:**
-```bash
-# Pull from Docker Hub
-docker-image-pusher pull nginx:latest
+Need to cache an image first? Run `pull` or `import` (see the table below) and then call `push <image>`—the flow is identical once the image is in `.cache/`.
 
-# Pull from private registry  
-docker-image-pusher pull registry.example.com/app:v1.0
+### Command Reference
 
-# Pull large image (this is where memory optimization shines)
-docker-image-pusher pull registry.cn-beijing.aliyuncs.com/yoce/vllm-openai:v0.9.0.1
-```
+| Command | When to use | Key flags |
+|---------|-------------|-----------|
+| `pull <image>` | Cache an image from any registry | – |
+| `import <tar> <name>` | Convert `docker save` output into cache | – |
+| `push <input>` | Upload cached image **or** tar; `<input>` can be `nginx:latest` or `./file.tar` | `-t` target override, `--registry` host override, `--username/--password` credential override |
+| `login <registry>` | Save credentials for future pushes | `--username`, `--password` |
 
-#### Push Cached Image to Registry
+### Tips
 
-```bash
-docker-image-pusher push <source-image> <target-image> --username <user> --password <pass>
-```
-
-**Examples:**
-```bash
-# Push to Docker Hub
-docker-image-pusher push nginx:latest myregistry/nginx:latest --username myuser --password mypass
-
-# Push to private registry
-docker-image-pusher push app:v1.0 registry.company.com/app:v1.0 --username deploy --password secret
-```
-
-### Advanced Usage
-
-#### Environment Variables
-
-You can also set credentials via environment variables:
-```bash
-export DOCKER_USERNAME=myuser
-export DOCKER_PASSWORD=mypass
-docker-image-pusher push nginx:latest myregistry/nginx:latest --username $DOCKER_USERNAME --password $DOCKER_PASSWORD
-```
+- Need a different account temporarily? Pass `--username/--password` (or use env vars such as `DOCKER_USERNAME`) and they override stored credentials for that run only.
+- Prefer scripting? Keep everything declarative: `login` once inside CI, then run `pull`, `push`, done.
+- Unsure what target was used last time? Run `push` without `-t`; the history-based inference will suggest a sane default and print it before uploading.
 
 ## 🏗️ Architecture
 

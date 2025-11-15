@@ -1,5 +1,5 @@
-use crate::image;
 use crate::PusherError;
+use crate::image;
 use oci_client::{Client, Reference};
 
 use std::path::Path;

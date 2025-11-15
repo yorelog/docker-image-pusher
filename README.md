@@ -109,6 +109,13 @@ Need to cache an image first? Run `pull` or `import` (see the table below) and t
 | `push <input>` | Upload cached image **or** tar; `<input>` can be `nginx:latest` or `./file.tar` | `-t` target override, `--registry` host override, `--username/--password` credential override |
 | `login <registry>` | Save credentials for future pushes | `--username`, `--password` |
 
+The `push` command now handles most of the bookkeeping automatically:
+
+- infers a sensible destination from tar metadata, the last five targets, or stored credentials
+- prompts once when switching registries (or auto-confirms if you accepted it before)
+- imports `docker save` archives on the fly before uploading
+- reuses saved logins unless you pass explicit `--username/--password`
+
 ### Tips
 
 - Need a different account temporarily? Pass `--username/--password` (or use env vars such as `DOCKER_USERNAME`) and they override stored credentials for that run only.
@@ -211,6 +218,17 @@ if layer_size_mb > 50.0 { // Lower threshold
 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Longer delay
 ```
 
+### Debugging OCI Traffic
+
+Set the following environment variables to inspect the raw OCI flow without recompiling:
+
+| Variable | Effect |
+|----------|--------|
+| `OCI_DEBUG=1` | Logs every HTTP request/response handled by the internal OCI client (method, URL, status, scope). |
+| `OCI_DEBUG_UPLOAD=1` | Adds detailed tracing for blob uploads (upload session URLs, redirects, finalization). Inherits `OCI_DEBUG` when set. |
+
+These logs run through `println!`, so they appear directly in the CLI output and can be piped to files for troubleshooting.
+
 ## 📊 Performance Comparison
 
 ### Memory Usage (Processing 5GB Image)
@@ -276,10 +294,12 @@ cargo test
 
 ### Code Structure
 
-- `main.rs` - Main application entry point and CLI handling
-- `cache_image()` - Pull and caching logic with streaming
-- `push_cached_image()` - Push logic with memory optimization
-- `PusherError` - Custom error types for better error handling
+- `src/main.rs` - Lean CLI + shared constants (delegates to modules)
+- `src/push.rs` - Push/import workflow, target inference, confirmation prompts
+- `src/tar_import.rs` - Tar parsing, RepoTag helpers, import pipeline
+- `src/cache.rs` - Pull and caching logic with streaming
+- `src/state.rs` - Credential storage + push history tracking
+- `PusherError` - Custom error type re-exported from `main.rs`
 
 ### Adding Features
 

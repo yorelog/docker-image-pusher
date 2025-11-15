@@ -8,6 +8,13 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 const HISTORY_FILE: &str = "push_history.json";
 const MAX_HISTORY: usize = 5;
 
+#[derive(Debug, Clone)]
+pub struct StoredCredential {
+    pub registry: String,
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct CredentialRecord {
     username: String,
@@ -42,6 +49,19 @@ pub async fn load_credentials(registry: &str) -> Result<Option<(String, String)>
         .entries
         .get(registry)
         .map(|entry| (entry.username.clone(), entry.password.clone())))
+}
+
+pub async fn all_credentials() -> Result<Vec<StoredCredential>> {
+    let store = load_credentials_store().await?;
+    Ok(store
+        .entries
+        .iter()
+        .map(|(registry, record)| StoredCredential {
+            registry: registry.clone(),
+            username: record.username.clone(),
+            password: record.password.clone(),
+        })
+        .collect())
 }
 
 pub async fn record_push_target(target: &str) -> Result<()> {

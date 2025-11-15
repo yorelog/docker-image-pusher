@@ -1,6 +1,8 @@
 use crate::PusherError;
 use crate::image;
-use oci_client::{Client, Reference};
+use crate::oci::auth::RegistryAuth;
+use crate::oci::client::Client;
+use crate::oci::reference::Reference;
 
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
@@ -31,7 +33,7 @@ use tokio::io::AsyncWriteExt;
 /// `Result<(), PusherError>` - Success or detailed error information
 pub async fn cache_image(client: &Client, source_image: &str) -> Result<(), PusherError> {
     // Use anonymous authentication for public registries
-    let auth = oci_client::secrets::RegistryAuth::Anonymous;
+    let auth = RegistryAuth::anonymous();
 
     // Parse the image reference to validate format and extract components
     let image_ref: Reference = source_image
@@ -102,7 +104,7 @@ pub async fn cache_image(client: &Client, source_image: &str) -> Result<(), Push
         })?;
 
         client
-            .pull_blob(&image_ref, layer_desc, &mut file)
+            .pull_blob(&image_ref, layer_desc, &auth, &mut file)
             .await
             .map_err(|e| {
                 PusherError::PullError(format!("Failed to stream layer {}: {}", layer_digest, e))
@@ -159,7 +161,7 @@ pub async fn cache_image(client: &Client, source_image: &str) -> Result<(), Push
         .map_err(|e| PusherError::CacheError(format!("Failed to create config file: {}", e)))?;
 
     client
-        .pull_blob(&image_ref, config_desc, &mut config_file)
+        .pull_blob(&image_ref, config_desc, &auth, &mut config_file)
         .await
         .map_err(|e| PusherError::PullError(format!("Failed to stream config: {}", e)))?;
 

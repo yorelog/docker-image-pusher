@@ -43,26 +43,31 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary_name: docker-image-pusher-linux-x86_64
+            binary_src: docker-image-pusher
             cross: false
           - os: ubuntu-latest  
             target: aarch64-unknown-linux-musl
             binary_name: docker-image-pusher-linux-aarch64
+            binary_src: docker-image-pusher
             cross: true
           
           # Windows builds
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: docker-image-pusher.exe
+            binary_src: docker-image-pusher.exe
             cross: false
           
           # macOS builds (statically linked by default)
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: docker-image-pusher-darwin-x86_64
+            binary_src: docker-image-pusher
             cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: docker-image-pusher-darwin-aarch64
+            binary_src: docker-image-pusher
             cross: false
 
     runs-on: ${{ matrix.os }}
@@ -107,11 +112,17 @@ jobs:
       env:
         RUSTFLAGS: "-C target-feature=+crt-static"
 
+    - name: Prepare artifact
+      shell: bash
+      run: |
+        mkdir -p dist
+        cp target/${{ matrix.target }}/release/${{ matrix.binary_src }} dist/${{ matrix.binary_name }}
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: docker-image-pusher-${{ matrix.target }}
-        path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        path: dist/${{ matrix.binary_name }}
 
   release:
     name: Create Release

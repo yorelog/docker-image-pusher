@@ -25,6 +25,14 @@ This tool implements **streaming-based layer processing** using the OCI client l
 - ✅ **Local Caching**: Efficient caching system for faster subsequent operations
 - ✅ **Progress Monitoring**: Real-time feedback on transfer progress and layer sizes
 
+## 🆕 What's New in 0.5.2
+
+- **Push workflow orchestrator** – New `PushWorkflow` struct now coordinates input analysis, target inference, credential lookup, cache hydration, and the layer/config upload sequence. Each stage is its own method, making the CLI easier to extend while keeping the streaming guarantees the project is known for.
+- **Smarter destination & credential inference** – History- and tar-metadata-based target suggestions now live inside the workflow. The confirmation prompt remembers previously accepted registries, and credential lookup cleanly falls back to stored logins before asking for overrides.
+- **Large-layer telemetry** – Chunked uploads for 1GB+ layers emit richer progress, ETA, and throughput stats. We only keep a single chunk in memory and back off between medium-sized layers to stay friendly to registries with aggressive rate limits.
+- **Tar importer refactor** – A dedicated `TarImporter` groups manifest parsing, layer extraction, digest calculation, and cache persistence. Extraction progress for oversized layers mirrors the push progress bars so you can see streaming speeds end-to-end.
+- **Vendor cleanup** – Removed the old vendored OCI client copy and its tests; the workspace now relies solely on the published crates, which simplifies audits and shrinks the source tree.
+
 ## 📋 Prerequisites
 
 - **Rust**: Version 1.70 or later

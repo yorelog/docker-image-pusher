@@ -21,7 +21,7 @@ This tool implements **streaming-based layer processing** using the OCI client l
 
 - ✅ **Streaming Downloads**: Layers are streamed directly to disk without loading into memory
 - ✅ **Sequential Processing**: Processes one layer at a time to minimize memory footprint  
-- ✅ **Chunked Uploads**: Large layers (>100MB) are read in 50MB chunks during upload
+- ✅ **Chunked Uploads**: Layers ≥500MB stream in ~5MB chunks (auto-expands when registries demand larger slices)
 - ✅ **Local Caching**: Efficient caching system for faster subsequent operations
 - ✅ **Progress Monitoring**: Real-time feedback on transfer progress and layer sizes
 
@@ -46,12 +46,6 @@ can be embedded in other tools. It exposes:
 `docker-image-pusher` consumes `oci-core` through a normal Cargo path dependency, mirroring how
 Rust itself treats the `core` crate. This keeps the CLI boundary clean while enabling other
 projects to reuse the same stable OCI primitives without pulling in the rest of the binary.
-
-## 📋 Prerequisites
-
-- **Rust**: Version 1.70 or later
-- **Network Access**: To source and target registries
-- **Disk Space**: Sufficient space for caching large images
 
 ## 🛠️ Installation
 
@@ -143,11 +137,6 @@ The `push` command now handles most of the bookkeeping automatically:
 - imports `docker save` archives on the fly before uploading
 - reuses saved logins unless you pass explicit `--username/--password`
 
-### Tips
-
-- Need a different account temporarily? Pass `--username/--password` (or use env vars such as `DOCKER_USERNAME`) and they override stored credentials for that run only.
-- Prefer scripting? Keep everything declarative: `login` once inside CI, then run `pull`, `push`, done.
-- Unsure what target was used last time? Run `push` without `-t`; the history-based inference will suggest a sane default and print it before uploading.
 
 ## 🏗️ Architecture
 
@@ -193,168 +182,8 @@ Tar archives produced by `save` live wherever you choose to write them (current 
 4. **Layer/config upload** – reuse existing blobs when present, otherwise stream in fixed-size chunks with telemetry.
 5. **Manifest publish** – rebuild the OCI manifest and push it once all blobs are present.
 
-### Layer Processing Strategies
 
-| Layer Size | Strategy | Memory Usage | Description |
-|------------|----------|--------------|-------------|
-| < 100MB | Direct Read | ~Layer Size | Read entire layer into memory |
-| > 100MB | Chunked Read | ~50MB | Read in 50MB chunks with delays |
-| Any Size | Streaming | ~Buffer Size | Direct stream to/from disk |
-| Pipeline | Parallel Uploads | ~Buffer Size per worker | Extraction publishes layers into an async queue while up to 3 concurrent upload tasks push blobs |
+## 🤝 Welcome Contributing
 
-Layer extraction now feeds an async channel as soon as each blob hits disk, so uploading overlaps with the remaining tar processing. The default concurrency spins up three upload tasks (tunable in code) to take advantage of multi-core hosts and higher latency links, while still honoring the sequential manifest ordering when publishing.
-
-## 🔧 Configuration
-
-### Client Configuration
-
-The tool uses these default settings:
-
-```rust
-// Platform resolver for multi-arch images
-platform_resolver = linux_amd64_resolver
-
-// Authentication methods
-- Anonymous (for public registries)
-- Basic Auth (username/password)
-
-// Chunk size for large layers
-chunk_size = 50MB
-
-// Rate limiting delays
-large_layer_delay = 200ms
-chunk_delay = 10ms
-```
-
-### Customization
-
-You can modify these settings in `src/main.rs`:
-
-```rust
-// Adjust chunk size for very large layers
-let chunk_size = 100 * 1024 * 1024; // 100MB chunks
-
-// Modify size threshold for chunked processing  
-if layer_size_mb > 50.0 { // Lower threshold
-    // Use chunked approach
-}
-
-// Adjust rate limiting
-tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Longer delay
-```
-
-### Debugging OCI Traffic
-
-Set the following environment variables to inspect the raw OCI flow without recompiling:
-
-| Variable | Effect |
-|----------|--------|
-| `OCI_DEBUG=1` | Logs every HTTP request/response handled by the internal OCI client (method, URL, status, scope). |
-| `OCI_DEBUG_UPLOAD=1` | Adds detailed tracing for blob uploads (upload session URLs, redirects, finalization). Inherits `OCI_DEBUG` when set. |
-
-These logs run through `println!`, so they appear directly in the CLI output and can be piped to files for troubleshooting.
-
-## 📊 Performance Comparison
-
-### Memory Usage (Processing 5GB Image)
-
-| Method | Peak Memory | Notes |
-|--------|-------------|-------|
-| Traditional Docker | ~5.2GB | Loads layers into memory |
-| **This Tool** | ~50MB | Streams with chunked processing |
-
-### Transfer Speed
-
-- **Network bound**: Performance limited by network speed
-- **Consistent memory**: No memory-related slowdowns
-- **Parallel-safe**: Can run multiple instances without memory conflicts
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-#### "Authentication failed"
-```bash
-Error: Push error: Authentication failed: ...
-```
-**Solution**: Verify username/password and registry permissions
-
-#### "No local images detected via <runtime>"
-```bash
-Error: No local images detected via docker
-```
-**Solution**: Ensure the image exists locally (e.g., `docker images`) or pass it explicitly to `save`.
-
-#### "Failed to create state directory"
-```bash
-Error: Cache error: Failed to create state directory ...
-```
-**Solution**: Verify you have write access to the current working directory (or set `STATE_DIR` via environment variables, if you relocate it in code).
-
-#### Memory Issues (Still occurring)
-If you're still experiencing memory issues:
-
-1. **Check chunk size**: Reduce chunk size in code
-2. **Monitor disk space**: Ensure sufficient space for caching
-3. **Close other applications**: Free up system memory
-4. **Use sequential processing**: Avoid concurrent operations
-
-### Debug Mode
-
-Add debug logging by setting environment variable:
-```bash
-RUST_LOG=debug docker-image-pusher pull nginx:latest
-```
-
-## 🤝 Contributing
-
-### Development Setup
-
-```bash
-git clone <repository-url>
-cd docker-image-pusher
-cargo build
-cargo test
-```
-
-### Code Structure
-
-- `src/main.rs` - Lean CLI + shared constants (delegates to modules)
-- `src/push.rs` - Push/import workflow, target inference, confirmation prompts
-- `src/tar_import.rs` - Tar parsing, RepoTag helpers, import pipeline
-- `src/cache.rs` - Pull and caching logic with streaming
-- `src/state.rs` - Credential storage + push history tracking
-- `PusherError` - Custom error type re-exported from `main.rs`
-
-### Adding Features
-
-1. **New authentication methods**: Extend `RegistryAuth` usage
-2. **Progress bars**: Add progress indication for long transfers
-3. **Compression**: Add layer compression/decompression support
-4. **Parallel processing**: Implement safe concurrent layer transfers
-
-## 📄 License
-
-[Add your license information here]
-
-## 🔗 Dependencies
-
-- **oci-client**: OCI registry client with streaming support
-- **tokio**: Async runtime for concurrent operations
-- **clap**: Command-line argument parsing
-- **serde_json**: JSON serialization for metadata
-- **thiserror**: Structured error handling
-
-## 📈 Future Enhancements
-
-- [ ] Progress bars for long transfers
-- [ ] Resume interrupted transfers
-- [ ] Compression optimization
-- [ ] Multi-registry synchronization
-- [ ] Garbage collection for cache
-- [ ] Configuration file support
-- [ ] Integration with CI/CD pipelines
-
----
 
 **Happy Docker image transferring! 🐳**

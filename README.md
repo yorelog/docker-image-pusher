@@ -25,14 +25,13 @@ This tool implements **streaming-based layer processing** using the OCI client l
 - ✅ **Local Caching**: Efficient caching system for faster subsequent operations
 - ✅ **Progress Monitoring**: Real-time feedback on transfer progress and layer sizes
 
-## 🆕 What's New in 0.5.2
+## 🆕 What's New in 0.5.4
 
-- **Push workflow orchestrator** – New `PushWorkflow` struct now coordinates input analysis, target inference, credential lookup, tar extraction, and the layer/config upload sequence. Each stage is its own method, making the CLI easier to extend while keeping the streaming guarantees the project is known for.
-- **Smarter destination & credential inference** – History- and tar-metadata-based target suggestions now live inside the workflow. The confirmation prompt remembers previously accepted registries, and credential lookup cleanly falls back to stored logins before asking for overrides.
-- **Large-layer telemetry** – Chunked uploads for 1GB+ layers emit richer progress, ETA, and throughput stats. We only keep a single chunk in memory and back off between medium-sized layers to stay friendly to registries with aggressive rate limits.
-- **Tar-first workflow** – A new `save` command exports local images directly from Docker/nerdctl/Podman, producing tars tailored for the streaming `push` flow. This replaces the older cache/pull/import commands with a simpler two-step experience.
-- **Tar importer refactor** – A dedicated `TarImporter` groups manifest parsing, layer extraction, digest calculation, and temporary-file management. Extraction progress for oversized layers mirrors the push progress bars so you can see streaming speeds end-to-end.
-- **Vendor cleanup** – Removed the old vendored OCI client copy and its tests; the workspace now relies solely on the published crates, which simplifies audits and shrinks the source tree.
+- **Pipeline lives in `oci-core`** – The concurrent extraction/upload queue, blob-existence checks, rate limiting, and telemetry now ship inside the reusable `oci-core::blobs` module. Other projects can embed the exact same uploader without copy/paste.
+- **Prefetch-aware chunk uploads** – Large layers read an initial chunk into memory before network I/O begins, giving registries a steady stream immediately and honoring any server-provided chunk size hints mid-flight.
+- **Tar importer emits shared `LocalLayer` structs** – `tar_import.rs` now returns the exact structs consumed by `LayerUploadPool`, eliminating adapter code and reducing memory copies during extraction.
+- **Cleaner push workflow** – `src/push.rs` delegates scheduling to `LayerUploadPool`, so the CLI only worries about plan setup, manifest publishing, and user prompts. The parallelism cap and chunk sizing still respect the same CLI flags as before.
+- **Docs caught up** – This README now documents the pipeline-focused architecture, the new reusable uploader, and the 0.5.4 feature set.
 
 ## OCI Core Library
 

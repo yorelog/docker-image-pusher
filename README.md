@@ -27,10 +27,11 @@ This tool implements **streaming-based layer processing** using the OCI client l
 
 ## 🆕 What's New in 0.5.2
 
-- **Push workflow orchestrator** – New `PushWorkflow` struct now coordinates input analysis, target inference, credential lookup, cache hydration, and the layer/config upload sequence. Each stage is its own method, making the CLI easier to extend while keeping the streaming guarantees the project is known for.
+- **Push workflow orchestrator** – New `PushWorkflow` struct now coordinates input analysis, target inference, credential lookup, tar extraction, and the layer/config upload sequence. Each stage is its own method, making the CLI easier to extend while keeping the streaming guarantees the project is known for.
 - **Smarter destination & credential inference** – History- and tar-metadata-based target suggestions now live inside the workflow. The confirmation prompt remembers previously accepted registries, and credential lookup cleanly falls back to stored logins before asking for overrides.
 - **Large-layer telemetry** – Chunked uploads for 1GB+ layers emit richer progress, ETA, and throughput stats. We only keep a single chunk in memory and back off between medium-sized layers to stay friendly to registries with aggressive rate limits.
-- **Tar importer refactor** – A dedicated `TarImporter` groups manifest parsing, layer extraction, digest calculation, and cache persistence. Extraction progress for oversized layers mirrors the push progress bars so you can see streaming speeds end-to-end.
+- **Tar-first workflow** – A new `save` command exports local images directly from Docker/nerdctl/Podman, producing tars tailored for the streaming `push` flow. This replaces the older cache/pull/import commands with a simpler two-step experience.
+- **Tar importer refactor** – A dedicated `TarImporter` groups manifest parsing, layer extraction, digest calculation, and temporary-file management. Extraction progress for oversized layers mirrors the push progress bars so you can see streaming speeds end-to-end.
 - **Vendor cleanup** – Removed the old vendored OCI client copy and its tests; the workspace now relies solely on the published crates, which simplifies audits and shrinks the source tree.
 
 ## OCI Core Library
@@ -105,31 +106,36 @@ The compiled binary will be available at `target/release/docker-image-pusher` (o
 
 ## 📖 Usage
 
-### Quick Start (two commands)
+### Quick Start (three commands)
 
 1. **Login (once per registry)**
     ```bash
     docker-image-pusher login registry.example.com --username user --password pass
     ```
-    Credentials are saved under `.cache/credentials.json` for reuse.
+    Credentials are saved under `.docker-image-pusher/credentials.json` and reused automatically.
 
-2. **Push a docker save tar directly**
+2. **Save a local image to a tarball**
     ```bash
-    docker-image-pusher push ./nginx.tar
+    docker-image-pusher save nginx:latest
     ```
-    - Create the tar with `docker save nginx:latest -o nginx.tar` (or any image you like).
-    - During `push`, the tool automatically combines the RepoTag inside the tar with the registry you just logged into (or the last five registries you pushed to) and prints something like `🎯 Target image resolved as: registry.example.com/tools/nginx:latest` before uploading. Pass `--registry other.example.com` if you need to override the destination host.
+    - Detects Docker/nerdctl/Podman automatically (or pass `--runtime`).
+    - Prompts for image selection if you omit arguments.
+    - Produces a sanitized tar such as `./nginx_latest.tar`.
 
-Need to cache an image first? Run `pull` or `import` (see the table below) and then call `push <image>`—the flow is identical once the image is in `.cache/`.
+3. **Push the tar archive**
+    ```bash
+    docker-image-pusher push ./nginx_latest.tar
+    ```
+    - The RepoTag embedded in the tar is combined with the most recent registry you authenticated against (or `--target/--registry` overrides).
+    - If the destination image was confirmed previously, we auto-continue after a short pause; otherwise we prompt before uploading.
 
 ### Command Reference
 
 | Command | When to use | Key flags |
 |---------|-------------|-----------|
-| `pull <image>` | Cache an image from any registry | – |
-| `import <tar> <name>` | Convert `docker save` output into cache | – |
-| `push <input>` | Upload cached image **or** tar; `<input>` can be `nginx:latest` or `./file.tar` | `-t` target override, `--registry` host override, `--username/--password` credential override, `--blob-chunk` chunk size (MiB) |
-| `login <registry>` | Save credentials for future pushes | `--username`, `--password` |
+| `save [IMAGE ...]` | Export one or more local images to tar archives | `--runtime`, `--output-dir`, `--force` |
+| `push <tar>` | Upload a docker-save tar archive directly to a registry | `-t/--target`, `--registry`, `--username/--password`, `--blob-chunk` |
+| `login <registry>` | Persist credentials for future pushes | `--username`, `--password` |
 
 The `push` command now handles most of the bookkeeping automatically:
 
@@ -162,36 +168,31 @@ Optimized Approach (Low Memory):
 ✅ Handles multi-GB images efficiently
 ```
 
-### Cache Structure
+### State Directory
 
-Images are cached in `.cache/` directory with the following structure:
+Credential material and push history are stored under `.docker-image-pusher/`:
 
 ```
-.cache/
-└── {sanitized_image_name}/
-    ├── index.json              # Metadata and layer list
-    ├── manifest.json           # OCI image manifest
-    ├── config_{digest}.json    # Image configuration
-    ├── {layer_digest_1}        # Layer file 1
-    ├── {layer_digest_2}        # Layer file 2
-    └── ...                     # Additional layers
+.docker-image-pusher/
+├── credentials.json   # registry → username/password pairs from `login`
+└── push_history.json  # most recent destinations (used for inference/prompts)
 ```
+
+Tar archives produced by `save` live wherever you choose to write them (current directory by default). They remain ordinary `docker save` outputs, so you can transfer them, scan them, or delete them independently of the CLI state.
 
 ### Processing Flow
 
-#### Pull Operation:
-1. **Fetch Manifest** - Download image metadata (~1-5KB)
-2. **Create Cache Structure** - Set up local directories
-3. **Stream Layers** - Download each layer directly to disk
-4. **Cache Metadata** - Store manifest and configuration
-5. **Create Index** - Generate lookup metadata
+#### Save Operation (runtime → tar):
+1. **Runtime detection** – locate Docker, nerdctl, or Podman (or honor `--runtime`).
+2. **Image selection** – parse JSON output from `images --format '{{json .}}'` and optionally prompt.
+3. **Tar export** – call `<runtime> save image -o file.tar`, sanitizing filenames and warning before overwrites.
 
-#### Push Operation:
-1. **Authenticate** - Connect to target registry
-2. **Read Cache** - Load cached image metadata
-3. **Upload Layers** - Transfer layers with size-based optimization
-4. **Upload Config** - Transfer image configuration
-5. **Push Manifest** - Complete the image transfer
+#### Push Operation (tar → registry):
+1. **Authenticate** – load stored credentials or prompt for overrides.
+2. **Tar analysis** – extract RepoTags + manifest to infer the final destination.
+3. **Layer extraction** – stream each layer from the tar into temporary files while hashing and reporting progress.
+4. **Layer/config upload** – reuse existing blobs when present, otherwise stream in fixed-size chunks with telemetry.
+5. **Manifest publish** – rebuild the OCI manifest and push it once all blobs are present.
 
 ### Layer Processing Strategies
 
@@ -200,6 +201,9 @@ Images are cached in `.cache/` directory with the following structure:
 | < 100MB | Direct Read | ~Layer Size | Read entire layer into memory |
 | > 100MB | Chunked Read | ~50MB | Read in 50MB chunks with delays |
 | Any Size | Streaming | ~Buffer Size | Direct stream to/from disk |
+| Pipeline | Parallel Uploads | ~Buffer Size per worker | Extraction publishes layers into an async queue while up to 3 concurrent upload tasks push blobs |
+
+Layer extraction now feeds an async channel as soon as each blob hits disk, so uploading overlaps with the remaining tar processing. The default concurrency spins up three upload tasks (tunable in code) to take advantage of multi-core hosts and higher latency links, while still honoring the sequential manifest ordering when publishing.
 
 ## 🔧 Configuration
 
@@ -276,17 +280,17 @@ Error: Push error: Authentication failed: ...
 ```
 **Solution**: Verify username/password and registry permissions
 
-#### "Cache not found"  
+#### "No local images detected via <runtime>"
 ```bash
-Error: Cache not found
+Error: No local images detected via docker
 ```
-**Solution**: Run `pull` command first to cache the image
+**Solution**: Ensure the image exists locally (e.g., `docker images`) or pass it explicitly to `save`.
 
-#### "Failed to create cache directory"
+#### "Failed to create state directory"
 ```bash
-Error: Cache error: Failed to create cache directory: ...
+Error: Cache error: Failed to create state directory ...
 ```
-**Solution**: Check disk space and write permissions
+**Solution**: Verify you have write access to the current working directory (or set `STATE_DIR` via environment variables, if you relocate it in code).
 
 #### Memory Issues (Still occurring)
 If you're still experiencing memory issues:

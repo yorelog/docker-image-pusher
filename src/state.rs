@@ -1,4 +1,4 @@
-use crate::{CACHE_DIR, PusherError};
+use crate::{PusherError, STATE_DIR};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,13 +126,13 @@ where
 }
 
 async fn state_file_path(file_name: &str) -> Result<PathBuf> {
-    let cache_dir = PathBuf::from(CACHE_DIR);
-    tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
+    let state_dir = PathBuf::from(STATE_DIR);
+    tokio::fs::create_dir_all(&state_dir).await.map_err(|e| {
         PusherError::CacheError(format!(
-            "Failed to create cache directory {}: {}",
-            cache_dir.display(),
+            "Failed to create state directory {}: {}",
+            state_dir.display(),
             e
         ))
     })?;
-    Ok(cache_dir.join(file_name))
+    Ok(state_dir.join(file_name))
 }

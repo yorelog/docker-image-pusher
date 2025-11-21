@@ -1,26 +1,24 @@
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
-mod cache;
-mod image;
 mod push;
+mod save;
 mod state;
 mod tar_import;
 
 use oci_core::client::{Client, ClientConfig};
 
-pub const CACHE_DIR: &str = ".cache";
+pub const STATE_DIR: &str = ".docker-image-pusher";
 pub const STREAM_BUFFER_SIZE: usize = 8 * 1024 * 1024;
-pub const PROGRESS_LAYER_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
+pub const PROGRESS_LAYER_THRESHOLD_BYTES: u64 = 500 * 1024 * 1024;
 pub const PROGRESS_UPDATE_INTERVAL_SECS: u64 = 3;
-pub const CHUNKED_LAYER_SIZE_BYTES: usize = 50 * 1024 * 1024;
+pub const CHUNKED_LAYER_SIZE_BYTES: usize = 5 * 1024 * 1024;
 pub const MAX_CHUNKED_LAYER_SIZE_BYTES: usize = 256 * 1024 * 1024;
-pub const LARGE_LAYER_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
-pub const LARGE_LAYER_THRESHOLD_MB: f64 = 100.0;
-pub const MEDIUM_LAYER_THRESHOLD_MB: f64 = 250.0;
-pub const ESTIMATED_SPEED_MBPS: f64 = 180.0;
-pub const LARGE_LAYER_PROGRESS_INTERVAL_SECS: u64 = 30;
-pub const NORMAL_LAYER_PROGRESS_INTERVAL_SECS: u64 = 10;
+pub const LARGE_LAYER_THRESHOLD_BYTES: u64 = 500 * 1024 * 1024;
+pub const LARGE_LAYER_THRESHOLD_MB: f64 = 500.0;
+pub const ESTIMATED_SPEED_MBPS: f64 = 10.0;
+pub const LARGE_LAYER_PROGRESS_INTERVAL_SECS: u64 = 3;
+pub const NORMAL_LAYER_PROGRESS_INTERVAL_SECS: u64 = 1;
 pub const RATE_LIMIT_DELAY_MS: u64 = 250;
 pub const GZIP_MAGIC_BYTES: [u8; 2] = [0x1F, 0x8B];
 
@@ -37,17 +35,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Stream an image from a registry into the on-disk cache
-    Pull {
-        /// Image reference such as `nginx:latest`
-        #[arg(value_name = "IMAGE")]
-        image: String,
-    },
-    /// Push either a cached image or a docker-save tarball to a registry
+    /// Push a docker-save tarball directly to a registry
     Push {
-        /// Cached image name or docker-save tar path
-        #[arg(value_name = "INPUT")]
-        input: String,
+        /// Docker-save tar path
+        #[arg(value_name = "TAR")]
+        tar: String,
         /// Override the destination reference (defaults to inference)
         #[arg(short, long)]
         target: Option<String>,
@@ -64,15 +56,8 @@ enum Commands {
         #[arg(long = "blob-chunk", value_name = "MB")]
         blob_chunk: Option<usize>,
     },
-    /// Import a docker-save tarball under a friendly cache key
-    Import {
-        /// Path to the docker-save tarball
-        #[arg(value_name = "TAR")]
-        tar: String,
-        /// Cache key to write under (e.g. myapp:latest)
-        #[arg(value_name = "NAME")]
-        name: String,
-    },
+    /// Save local container images to tar archives
+    Save(save::SaveArgs),
     /// Persist credentials for a registry so pushes can reuse them
     Login {
         /// Registry hostname such as registry.example.com
@@ -125,12 +110,8 @@ async fn main() -> Result<(), PusherError> {
     let client = Client::new(ClientConfig::default());
 
     match cli.command {
-        Commands::Pull { image } => {
-            cache::cache_image(&client, &image).await?;
-            println!(" Cached image: {}", image);
-        }
         Commands::Push {
-            input,
+            tar,
             target,
             username,
             password,
@@ -138,13 +119,12 @@ async fn main() -> Result<(), PusherError> {
             blob_chunk,
         } => {
             push::run_push(
-                &client, &input, target, username, password, registry, blob_chunk,
+                &client, &tar, target, username, password, registry, blob_chunk,
             )
             .await?;
         }
-        Commands::Import { tar, name } => {
-            tar_import::import_tar_file(&tar, &name).await?;
-            println!(" Imported {} into cache entry {}", tar, name);
+        Commands::Save(args) => {
+            save::run_save(args).await?;
         }
         Commands::Login {
             registry,

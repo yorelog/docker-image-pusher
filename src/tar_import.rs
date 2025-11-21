@@ -14,6 +14,7 @@ use crate::{
     GZIP_MAGIC_BYTES, PROGRESS_LAYER_THRESHOLD_BYTES, PROGRESS_UPDATE_INTERVAL_SECS, PusherError,
     STREAM_BUFFER_SIZE, state,
 };
+use oci_core::blobs::LocalLayer;
 
 /// Metadata about the repository/tag fields embedded in a docker-save archive.
 #[derive(Debug, Clone)]
@@ -29,17 +30,8 @@ pub struct TarRepoInfo {
 pub struct TarExtraction {
     pub config_digest: String,
     pub config_contents: Vec<u8>,
-    pub layers: Vec<ExtractedLayer>,
+    pub layers: Vec<LocalLayer>,
     _temp_dir: TempDir,
-}
-
-/// Description of a single extracted layer along with its temporary file path.
-#[derive(Debug, Clone)]
-pub struct ExtractedLayer {
-    pub digest: String,
-    pub media_type: String,
-    pub size: u64,
-    pub path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -63,17 +55,12 @@ struct LayerFile {
     media_type: String,
 }
 
-/// Reads a docker-save tarball, extracts its config/layers, and returns their metadata.
-#[allow(dead_code)]
-pub fn extract_tar_archive(tar_path: &str) -> Result<TarExtraction, PusherError> {
-    extract_tar_archive_with_sender(tar_path, None)
-}
 
 /// Variant of [`extract_tar_archive`] that also emits each extracted layer over the provided
 /// channel, allowing callers to start uploading while extraction continues.
 pub fn extract_tar_archive_with_sender(
     tar_path: &str,
-    layer_sender: Option<mpsc::Sender<ExtractedLayer>>,
+    layer_sender: Option<mpsc::Sender<LocalLayer>>,
 ) -> Result<TarExtraction, PusherError> {
     let manifest = parse_primary_manifest(tar_path)?;
     let temp_dir = TempDir::new().map_err(|e| {
@@ -89,7 +76,7 @@ pub fn extract_tar_archive_with_sender(
         let file = artifacts.layer_files.get(digest).ok_or_else(|| {
             PusherError::tar_error(format!("Missing extracted data for layer {}", digest))
         })?;
-        layers.push(ExtractedLayer {
+        layers.push(LocalLayer {
             digest: digest.clone(),
             media_type: file.media_type.clone(),
             size: file.size,
@@ -169,7 +156,7 @@ fn extract_layers_and_config(
     tar_path: &str,
     manifest: &ManifestInfo,
     output_dir: &Path,
-    layer_sender: Option<mpsc::Sender<ExtractedLayer>>,
+    layer_sender: Option<mpsc::Sender<LocalLayer>>,
 ) -> Result<ExtractionArtifacts, PusherError> {
     let tar_file = File::open(tar_path)
         .map_err(|e| PusherError::TarError(format!("Failed to reopen tar file: {}", e)))?;
@@ -289,7 +276,7 @@ fn extract_layers_and_config(
         );
 
         if let Some(sender) = &layer_sender {
-            let layer = ExtractedLayer {
+            let layer = LocalLayer {
                 digest: layer_digest.clone(),
                 media_type: media_type.clone(),
                 size: total_read,

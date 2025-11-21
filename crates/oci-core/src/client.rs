@@ -498,10 +498,11 @@ impl Client {
         digest: &str,
         chunk_size: usize,
         progress: Option<Arc<AtomicU64>>,
+        initial_chunk: Option<Vec<u8>>,
     ) -> Result<(), OciError> {
         let (mut upload_url, initial_chunk_hint) = self.begin_upload(reference, auth).await?;
         let scope = Self::push_scope(reference);
-        let mut effective_chunk = chunk_size;
+        let mut effective_chunk = chunk_size.max(1);
         if let Some(min_required) = initial_chunk_hint {
             if min_required > effective_chunk {
                 println!(
@@ -511,52 +512,53 @@ impl Client {
                 effective_chunk = min_required;
             }
         }
-        let mut buffer = vec![0u8; effective_chunk];
 
         if upload_debug_enabled() {
             println!("   🔗 Upload session started at {}", upload_url);
         }
+
+        if let Some(mut chunk_vec) = initial_chunk {
+            if let Some(min_required) = initial_chunk_hint {
+                if chunk_vec.len() < min_required {
+                    Self::top_up_initial_chunk(reader, &mut chunk_vec, min_required).await?;
+                }
+            }
+            if !chunk_vec.is_empty() {
+                let (next_url, next_hint) = self
+                    .transmit_chunk(upload_url, auth, &scope, chunk_vec, progress.as_ref())
+                    .await?;
+                upload_url = next_url;
+                if let Some(min_required) = next_hint {
+                    if min_required > effective_chunk {
+                        println!(
+                            "   📏 Registry increased minimum chunk to {:.0} MB; adjusting",
+                            min_required as f64 / (1024.0 * 1024.0)
+                        );
+                        effective_chunk = min_required;
+                    }
+                }
+            }
+        }
+
+        let mut buffer = vec![0u8; effective_chunk];
 
         loop {
             let read = reader.read(&mut buffer).await?;
             if read == 0 {
                 break;
             }
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static(OCTET_STREAM));
-            headers.insert(
-                CONTENT_LENGTH,
-                HeaderValue::from_str(&read.to_string()).map_err(|_| {
-                    OciError::InvalidResponse("Failed to encode chunk length".to_string())
-                })?,
-            );
-            let chunk = Bytes::copy_from_slice(&buffer[..read]);
-            let resp = self
-                .request(
-                    Method::PATCH,
-                    upload_url.clone(),
+            let (next_url, next_hint) = self
+                .transmit_chunk(
+                    upload_url,
                     auth,
-                    Some(headers),
-                    Some(chunk),
-                    Some(scope.clone()),
+                    &scope,
+                    buffer[..read].to_vec(),
+                    progress.as_ref(),
                 )
                 .await?;
-            if resp.status() != StatusCode::ACCEPTED {
-                return Err(OciError::Status {
-                    status: resp.status().as_u16(),
-                    message: resp.text().await.unwrap_or_default(),
-                });
-            }
-            if let Some(next) = resp.headers().get(LOCATION) {
-                if upload_debug_enabled() {
-                    if let Ok(loc) = next.to_str() {
-                        println!("   ↪️  Upload redirected to {}", loc);
-                    }
-                }
-                upload_url = Self::resolve_upload_url(resp.url(), Some(next))?;
-            }
+            upload_url = next_url;
 
-            if let Some(min_required) = Self::parse_chunk_hint(resp.headers()) {
+            if let Some(min_required) = next_hint {
                 if min_required > effective_chunk {
                     println!(
                         "   📏 Registry increased minimum chunk to {:.0} MB; adjusting",
@@ -565,10 +567,6 @@ impl Client {
                     effective_chunk = min_required;
                     buffer.resize(effective_chunk, 0);
                 }
-            }
-
-            if let Some(counter) = progress.as_ref() {
-                counter.fetch_add(read as u64, Ordering::Relaxed);
             }
         }
 
@@ -594,6 +592,74 @@ impl Client {
                 status: resp.status().as_u16(),
                 message: resp.text().await.unwrap_or_default(),
             });
+        }
+        Ok(())
+    }
+
+    async fn transmit_chunk(
+        &self,
+        upload_url: Url,
+        auth: &RegistryAuth,
+        scope: &str,
+        chunk: Vec<u8>,
+        progress: Option<&Arc<AtomicU64>>,
+    ) -> Result<(Url, Option<usize>), OciError> {
+        let chunk_len = chunk.len();
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(OCTET_STREAM));
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&chunk_len.to_string()).map_err(|_| {
+                OciError::InvalidResponse("Failed to encode chunk length".to_string())
+            })?,
+        );
+        let chunk_bytes = Bytes::from(chunk);
+        let resp = self
+            .request(
+                Method::PATCH,
+                upload_url.clone(),
+                auth,
+                Some(headers),
+                Some(chunk_bytes),
+                Some(scope.to_string()),
+            )
+            .await?;
+        if resp.status() != StatusCode::ACCEPTED {
+            return Err(OciError::Status {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let mut next_url = upload_url;
+        if let Some(next) = resp.headers().get(LOCATION) {
+            if upload_debug_enabled() {
+                if let Ok(loc) = next.to_str() {
+                    println!("   ↪️  Upload redirected to {}", loc);
+                }
+            }
+            next_url = Self::resolve_upload_url(resp.url(), Some(next))?;
+        }
+
+        if let Some(counter) = progress {
+            counter.fetch_add(chunk_len as u64, Ordering::Relaxed);
+        }
+
+        Ok((next_url, Self::parse_chunk_hint(resp.headers())))
+    }
+
+    async fn top_up_initial_chunk<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+        chunk: &mut Vec<u8>,
+        min_required: usize,
+    ) -> Result<(), OciError> {
+        while chunk.len() < min_required {
+            let remaining = min_required - chunk.len();
+            let mut pad = vec![0u8; remaining.min(4 * 1024 * 1024).max(1)];
+            let read = reader.read(&mut pad).await?;
+            if read == 0 {
+                break;
+            }
+            chunk.extend_from_slice(&pad[..read]);
         }
         Ok(())
     }

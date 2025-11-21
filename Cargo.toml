@@ -48,6 +48,6 @@ sha2 = "0.10"
 oci-core = { path = "crates/oci-core" }
 
 # CLI helpers
-which = "6.0"
+which = "8.0"
 
 

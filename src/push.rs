@@ -1,9 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
-use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use serde_json::Value;
 use tokio::{
     sync::mpsc,
@@ -16,8 +13,8 @@ use crate::{
     LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
     NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS, state,
     tar_import::{
-        ExtractedLayer, TarExtraction, TarRepoInfo, build_target_from_tar,
-        extract_tar_archive_with_sender, infer_target_from_history, tar_repo_info_from_path,
+        TarExtraction, TarRepoInfo, build_target_from_tar, extract_tar_archive_with_sender,
+        infer_target_from_history, tar_repo_info_from_path,
     },
 };
 
@@ -25,6 +22,7 @@ const DEFAULT_UPLOAD_CONCURRENCY: usize = 3;
 const MEDIUM_LAYER_THRESHOLD_MB: f64 = 250.0;
 use oci_core::{
     auth::RegistryAuth,
+    blobs::{LayerUploadOptions, LayerUploadPool, LocalLayer, ProgressOptions},
     client::Client,
     manifest::{OciDescriptor, OciImageManifest},
     reference::Reference,
@@ -227,54 +225,41 @@ impl<'a> PushWorkflow<'a> {
             self.upload_parallelism
         );
 
-        let (layer_tx, mut layer_rx) = mpsc::channel::<ExtractedLayer>(self.upload_parallelism * 2);
+        let (layer_tx, layer_rx) = mpsc::channel::<LocalLayer>(self.upload_parallelism * 2);
         let tar_path_string = tar_path.to_string();
         let extraction_handle = task::spawn_blocking(move || {
             extract_tar_archive_with_sender(&tar_path_string, Some(layer_tx))
         });
 
-        let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
-        let mut uploaded_layers = Vec::new();
-        let mut skipped_uploads = 0usize;
-        let mut receiver_closed = false;
+        let upload_options = LayerUploadOptions {
+            chunk_size_bytes: self.chunk_size_bytes,
+            large_layer_threshold_bytes: LARGE_LAYER_THRESHOLD_BYTES,
+            medium_layer_threshold_mb: MEDIUM_LAYER_THRESHOLD_MB,
+            rate_limit_delay_ms: RATE_LIMIT_DELAY_MS,
+            concurrency: self.upload_parallelism,
+            progress: ProgressOptions {
+                large_layer_threshold_mb: LARGE_LAYER_THRESHOLD_MB,
+                large_interval_secs: LARGE_LAYER_PROGRESS_INTERVAL_SECS,
+                normal_interval_secs: NORMAL_LAYER_PROGRESS_INTERVAL_SECS,
+                estimated_speed_mbps: ESTIMATED_SPEED_MBPS,
+            },
+        };
 
-        loop {
-            while in_flight.len() < self.upload_parallelism && !receiver_closed {
-                match layer_rx.recv().await {
-                    Some(layer) => {
-                        let auth = Arc::clone(&auth);
-                        in_flight.push(self.upload_layer_task(layer, target_ref, auth));
-                    }
-                    None => {
-                        receiver_closed = true;
-                    }
-                }
-            }
-
-            match in_flight.next().await {
-                Some(result) => {
-                    let outcome = result?;
-                    if outcome.skipped {
-                        skipped_uploads += 1;
-                    }
-                    uploaded_layers.push(outcome.digest);
-                }
-                None => {
-                    if receiver_closed {
-                        break;
-                    }
-                }
-            }
-        }
+        let uploader =
+            LayerUploadPool::new(self.client, target_ref, Arc::clone(&auth), upload_options);
+        let upload_summary = uploader
+            .upload_stream(layer_rx)
+            .await
+            .map_err(|err| PusherError::PushError(format!("Failed to upload layers: {}", err)))?;
 
         let extraction = extraction_handle.await.map_err(|err| {
             PusherError::push_error(format!("Tar extraction task failed: {}", err))
         })??;
 
-        if skipped_uploads > 0 {
+        if upload_summary.skipped > 0 {
             println!(
                 "💡 Skipped {} layer(s) that already existed in the registry",
-                skipped_uploads
+                upload_summary.skipped
             );
         }
 
@@ -299,161 +284,9 @@ impl<'a> PushWorkflow<'a> {
 
         println!(
             "🎉 Successfully pushed {} layers to {}",
-            uploaded_layers.len(),
+            upload_summary.uploaded.len(),
             manifest_url
         );
-        Ok(())
-    }
-
-    /// Provides a best-effort existence check before uploading a layer.
-    async fn blob_exists_in_registry(
-        &self,
-        target_ref: &Reference,
-        auth: &RegistryAuth,
-        digest: &str,
-    ) -> Result<bool, PusherError> {
-        match self.client.blob_exists(target_ref, digest, auth).await {
-            Ok(exists) => Ok(exists),
-            Err(err) => {
-                println!(
-                    "   ⚠️  Unable to check blob {} presence in registry (continuing with upload): {}",
-                    digest, err
-                );
-                Ok(false)
-            }
-        }
-    }
-
-    /// Streams large layers via the chunked upload pipeline with telemetry.
-    async fn upload_large_layer(
-        &self,
-        target_ref: &Reference,
-        auth: &RegistryAuth,
-        layer_path: &Path,
-        digest: &str,
-        layer_size_mb: f64,
-        layer_size_bytes: u64,
-    ) -> Result<(), PusherError> {
-        println!(
-            "   🔄 Chunk-streaming large layer ({:.1} MB) in {:.0} MB chunks (auto-adjusting)...",
-            layer_size_mb,
-            self.chunk_size_bytes as f64 / (1024.0 * 1024.0)
-        );
-
-        let upload_start = Instant::now();
-        let file = tokio::fs::File::open(layer_path).await.map_err(|e| {
-            PusherError::CacheError(format!("Failed to open extracted layer {}: {}", digest, e))
-        })?;
-        let mut reader = file;
-
-        if layer_size_mb > 1000.0 {
-            let estimated_time_min = layer_size_mb / ESTIMATED_SPEED_MBPS / 60.0;
-            println!(
-                "   ⏱️  Estimated upload time: {:.1}-{:.1} minutes",
-                estimated_time_min * 0.5,
-                estimated_time_min * 2.0
-            );
-        }
-
-        let network_start = Instant::now();
-        let bytes_sent = Arc::new(AtomicU64::new(0));
-        let progress_handle = create_progress_tracker(
-            layer_size_mb,
-            layer_size_bytes,
-            network_start,
-            digest,
-            Arc::clone(&bytes_sent),
-        );
-
-        let upload_result = self
-            .client
-            .push_blob_stream(
-                target_ref,
-                auth,
-                &mut reader,
-                digest,
-                self.chunk_size_bytes,
-                Some(bytes_sent),
-            )
-            .await;
-
-        if let Some(handle) = progress_handle {
-            handle.abort();
-        }
-
-        upload_result.map_err(|e| {
-            PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
-        })?;
-
-        let network_duration = network_start.elapsed();
-        let total_duration = upload_start.elapsed();
-        let upload_speed = if network_duration.as_secs() > 0 {
-            (layer_size_bytes as f64 / (1024.0 * 1024.0)) / network_duration.as_secs_f64()
-        } else {
-            0.0
-        };
-
-        println!(
-            "   ⚡ Chunked upload completed! Total: {:.1}s (upload: {:.1}s) @ {:.1} MB/s",
-            total_duration.as_secs_f64(),
-            network_duration.as_secs_f64(),
-            upload_speed
-        );
-
-        if layer_size_mb > 1000.0 {
-            let gb_transferred = layer_size_mb / 1024.0;
-            println!(
-                "   🎉 Successfully transferred {:.2} GB in {:.1} minutes",
-                gb_transferred,
-                network_duration.as_secs_f64() / 60.0
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Uploads small layers by reading them entirely into memory first.
-    async fn upload_small_layer(
-        &self,
-        target_ref: &Reference,
-        auth: &RegistryAuth,
-        layer_path: &Path,
-        digest: &str,
-        layer_size_mb: f64,
-    ) -> Result<(), PusherError> {
-        println!("   📤 Uploading layer directly...");
-
-        let read_start = Instant::now();
-        let layer_data = tokio::fs::read(layer_path).await.map_err(|e| {
-            PusherError::CacheError(format!("Failed to read extracted layer {}: {}", digest, e))
-        })?;
-
-        let read_duration = read_start.elapsed();
-        let upload_start = Instant::now();
-
-        self.client
-            .push_blob(target_ref, auth, &layer_data, digest)
-            .await
-            .map_err(|e| {
-                PusherError::PushError(format!("Failed to upload layer {}: {}", digest, e))
-            })?;
-
-        let upload_duration = upload_start.elapsed();
-        let total_duration = read_start.elapsed();
-        let speed = if total_duration.as_secs() > 0 {
-            layer_size_mb / total_duration.as_secs_f64()
-        } else {
-            0.0
-        };
-
-        println!(
-            "   ⚡ Completed in {:.1}s (read: {:.1}ms, upload: {:.1}s) @ {:.1} MB/s",
-            total_duration.as_secs_f64(),
-            read_duration.as_millis(),
-            upload_duration.as_secs_f64(),
-            speed
-        );
-
         Ok(())
     }
 
@@ -630,76 +463,6 @@ impl<'a> PushWorkflow<'a> {
             },
         }
     }
-
-    fn upload_layer_task<'b>(
-        &'b self,
-        layer: ExtractedLayer,
-        target_ref: &'b Reference,
-        auth: Arc<RegistryAuth>,
-    ) -> BoxFuture<'b, Result<LayerUploadOutcome, PusherError>> {
-        Box::pin(async move {
-            self.upload_single_layer(layer, target_ref, auth.as_ref())
-                .await
-        })
-    }
-
-    async fn upload_single_layer(
-        &self,
-        layer: ExtractedLayer,
-        target_ref: &Reference,
-        auth: &RegistryAuth,
-    ) -> Result<LayerUploadOutcome, PusherError> {
-        let layer_size_mb = layer.size as f64 / (1024.0 * 1024.0);
-        println!(
-            "📦 Uploading layer {} ({:.1} MB)",
-            layer.digest, layer_size_mb
-        );
-
-        if self
-            .blob_exists_in_registry(target_ref, auth, &layer.digest)
-            .await?
-        {
-            println!(
-                "   ✅ Layer already exists in registry, skipping upload: {}",
-                layer.digest
-            );
-            return Ok(LayerUploadOutcome {
-                digest: layer.digest,
-                skipped: true,
-            });
-        }
-
-        if layer.size >= LARGE_LAYER_THRESHOLD_BYTES {
-            self.upload_large_layer(
-                target_ref,
-                auth,
-                &layer.path,
-                &layer.digest,
-                layer_size_mb,
-                layer.size,
-            )
-            .await?;
-        } else {
-            self.upload_small_layer(target_ref, auth, &layer.path, &layer.digest, layer_size_mb)
-                .await?;
-        }
-
-        println!("   ✅ Successfully uploaded layer {}", layer.digest);
-
-        if layer_size_mb > MEDIUM_LAYER_THRESHOLD_MB {
-            time::sleep(Duration::from_millis(RATE_LIMIT_DELAY_MS)).await;
-        }
-
-        Ok(LayerUploadOutcome {
-            digest: layer.digest,
-            skipped: false,
-        })
-    }
-}
-
-struct LayerUploadOutcome {
-    digest: String,
-    skipped: bool,
 }
 
 /// Entry point for the push command. Handles tar imports, target inference, credential
@@ -737,108 +500,6 @@ pub async fn run_push(
     PushWorkflow::new(client, chunk_size_bytes, DEFAULT_UPLOAD_CONCURRENCY)
         .run(input, target_image, username, password, registry_override)
         .await
-}
-
-/// Formats megabytes into either MB or GB for progress logging.
-fn format_size_display(size_mb: f64) -> (f64, &'static str) {
-    if size_mb > 1024.0 {
-        (size_mb / 1024.0, "GB")
-    } else {
-        (size_mb, "MB")
-    }
-}
-
-/// Spawns the periodic progress reporter for large uploads.
-fn create_progress_tracker(
-    layer_size_mb: f64,
-    layer_size_bytes: u64,
-    network_start: Instant,
-    digest: &str,
-    bytes_sent: Arc<AtomicU64>,
-) -> Option<task::JoinHandle<()>> {
-    if layer_size_mb <= LARGE_LAYER_THRESHOLD_MB {
-        return None;
-    }
-
-    let layer_size_mb_clone = layer_size_mb;
-    let network_start_clone = network_start;
-    let bytes_sent_clone = bytes_sent;
-    let digest_suffix = digest.chars().skip(digest.len() - 8).collect::<String>();
-    let interval_secs = if layer_size_mb > 1000.0 {
-        LARGE_LAYER_PROGRESS_INTERVAL_SECS
-    } else {
-        NORMAL_LAYER_PROGRESS_INTERVAL_SECS
-    };
-
-    Some(tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(interval_secs));
-        let mut progress_counter = 1;
-
-        loop {
-            interval.tick().await;
-            let elapsed = network_start_clone.elapsed();
-
-            let elapsed_secs = elapsed.as_secs();
-
-            let sent_bytes = bytes_sent_clone.load(Ordering::Relaxed);
-            if sent_bytes == 0 && elapsed_secs < 5 {
-                continue;
-            }
-
-            let elapsed_min = elapsed.as_secs_f64() / 60.0;
-            let sent_mb = sent_bytes as f64 / (1024.0 * 1024.0);
-            let total_mb = layer_size_mb_clone;
-            let percent = if layer_size_bytes > 0 {
-                (sent_bytes as f64 / layer_size_bytes as f64 * 100.0).min(100.0)
-            } else {
-                0.0
-            };
-
-            let speed_mbps = if elapsed_secs > 0 {
-                sent_mb / elapsed.as_secs_f64()
-            } else {
-                0.0
-            };
-            let remaining_mb = (total_mb - sent_mb).max(0.0);
-            let eta_min = if speed_mbps > 0.0 {
-                remaining_mb / speed_mbps / 60.0
-            } else {
-                0.0
-            };
-
-            let (transferred_display, unit) = format_size_display(sent_mb);
-            let (total_display, _) = format_size_display(total_mb);
-
-            println!(
-                "   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: {:.1} MB/s | ETA: {:.1}min",
-                progress_counter,
-                percent,
-                transferred_display,
-                total_display,
-                unit,
-                speed_mbps,
-                eta_min
-            );
-
-            if progress_counter % 2 == 0 {
-                println!(
-                    "   📊 Data transferred: {}/{} bytes | Elapsed: {:.1}min | Layer: ...{}",
-                    sent_bytes, layer_size_bytes, elapsed_min, digest_suffix
-                );
-            }
-
-            if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
-                let gb_size = total_mb / 1024.0;
-                let completion_percent = percent;
-                println!(
-                    "   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress",
-                    gb_size, speed_mbps, completion_percent
-                );
-            }
-
-            progress_counter += 1;
-        }
-    }))
 }
 
 /// Rebuilds the OCI manifest describing the image extracted from the tarball.

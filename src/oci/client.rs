@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -17,6 +18,7 @@ use crate::oci::reference::Reference;
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const OCTET_STREAM: &str = "application/octet-stream";
+const OCI_CHUNK_MIN_LENGTH: &str = "OCI-Chunk-Min-Length";
 
 #[derive(Clone, Default)]
 pub struct ClientConfig {
@@ -270,11 +272,25 @@ impl Client {
         }
     }
 
+    fn parse_chunk_hint(headers: &HeaderMap) -> Option<usize> {
+        headers
+            .get(OCI_CHUNK_MIN_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .and_then(|value| {
+                if value > usize::MAX as u64 {
+                    None
+                } else {
+                    Some(value as usize)
+                }
+            })
+    }
+
     async fn begin_upload(
         &self,
         reference: &Reference,
         auth: &RegistryAuth,
-    ) -> Result<Url, OciError> {
+    ) -> Result<(Url, Option<usize>), OciError> {
         let mut url = Self::base_url(reference)?;
         url.path_segments_mut()
             .map_err(|_| OciError::Reference("Invalid repository path".to_string()))?
@@ -300,7 +316,9 @@ impl Client {
                 message: resp.text().await.unwrap_or_default(),
             });
         }
-        Self::resolve_upload_url(resp.url(), resp.headers().get(LOCATION))
+        let chunk_hint = Self::parse_chunk_hint(resp.headers());
+        let resolved = Self::resolve_upload_url(resp.url(), resp.headers().get(LOCATION))?;
+        Ok((resolved, chunk_hint))
     }
 
     pub async fn pull_image_manifest(
@@ -404,7 +422,7 @@ impl Client {
         data: &[u8],
         digest: &str,
     ) -> Result<(), OciError> {
-        let mut upload_url = self.begin_upload(reference, auth).await?;
+        let (mut upload_url, _) = self.begin_upload(reference, auth).await?;
         let scope = Self::push_scope(reference);
 
         if upload_debug_enabled() {
@@ -479,10 +497,21 @@ impl Client {
         reader: &mut R,
         digest: &str,
         chunk_size: usize,
+        progress: Option<Arc<AtomicU64>>,
     ) -> Result<(), OciError> {
-        let mut upload_url = self.begin_upload(reference, auth).await?;
+        let (mut upload_url, initial_chunk_hint) = self.begin_upload(reference, auth).await?;
         let scope = Self::push_scope(reference);
-        let mut buffer = vec![0u8; chunk_size];
+        let mut effective_chunk = chunk_size;
+        if let Some(min_required) = initial_chunk_hint {
+            if min_required > effective_chunk {
+                println!(
+                    "   📏 Registry requested {:.0} MB minimum chunks; increasing buffer",
+                    min_required as f64 / (1024.0 * 1024.0)
+                );
+                effective_chunk = min_required;
+            }
+        }
+        let mut buffer = vec![0u8; effective_chunk];
 
         if upload_debug_enabled() {
             println!("   🔗 Upload session started at {}", upload_url);
@@ -525,6 +554,21 @@ impl Client {
                     }
                 }
                 upload_url = Self::resolve_upload_url(resp.url(), Some(next))?;
+            }
+
+            if let Some(min_required) = Self::parse_chunk_hint(resp.headers()) {
+                if min_required > effective_chunk {
+                    println!(
+                        "   📏 Registry increased minimum chunk to {:.0} MB; adjusting",
+                        min_required as f64 / (1024.0 * 1024.0)
+                    );
+                    effective_chunk = min_required;
+                    buffer.resize(effective_chunk, 0);
+                }
+            }
+
+            if let Some(counter) = progress.as_ref() {
+                counter.fetch_add(read as u64, Ordering::Relaxed);
             }
         }
 

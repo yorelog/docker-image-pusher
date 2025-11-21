@@ -114,7 +114,7 @@ Need to cache an image first? Run `pull` or `import` (see the table below) and t
 |---------|-------------|-----------|
 | `pull <image>` | Cache an image from any registry | – |
 | `import <tar> <name>` | Convert `docker save` output into cache | – |
-| `push <input>` | Upload cached image **or** tar; `<input>` can be `nginx:latest` or `./file.tar` | `-t` target override, `--registry` host override, `--username/--password` credential override |
+| `push <input>` | Upload cached image **or** tar; `<input>` can be `nginx:latest` or `./file.tar` | `-t` target override, `--registry` host override, `--username/--password` credential override, `--blob-chunk` chunk size (MiB) |
 | `login <registry>` | Save credentials for future pushes | `--username`, `--password` |
 
 The `push` command now handles most of the bookkeeping automatically:

@@ -1,4 +1,4 @@
-﻿use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use thiserror::Error;
 
 mod cache;
@@ -15,6 +15,7 @@ pub const STREAM_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 pub const PROGRESS_LAYER_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 pub const PROGRESS_UPDATE_INTERVAL_SECS: u64 = 3;
 pub const CHUNKED_LAYER_SIZE_BYTES: usize = 50 * 1024 * 1024;
+pub const MAX_CHUNKED_LAYER_SIZE_BYTES: usize = 256 * 1024 * 1024;
 pub const LARGE_LAYER_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 pub const LARGE_LAYER_THRESHOLD_MB: f64 = 100.0;
 pub const MEDIUM_LAYER_THRESHOLD_MB: f64 = 250.0;
@@ -60,6 +61,9 @@ enum Commands {
         /// Password override for one-off pushes
         #[arg(long)]
         password: Option<String>,
+        /// Override the chunk size (in MiB) used for large layer uploads
+        #[arg(long = "blob-chunk", value_name = "MB")]
+        blob_chunk: Option<usize>,
     },
     /// Import a docker-save tarball under a friendly cache key
     Import {
@@ -132,8 +136,12 @@ async fn main() -> Result<(), PusherError> {
             username,
             password,
             registry,
+            blob_chunk,
         } => {
-            push::run_push(&client, &input, target, username, password, registry).await?;
+            push::run_push(
+                &client, &input, target, username, password, registry, blob_chunk,
+            )
+            .await?;
         }
         Commands::Import { tar, name } => {
             tar_import::import_tar_file(&tar, &name).await?;

@@ -1,17 +1,19 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde_json;
 use tokio::{
-    io::BufReader,
     task,
     time::{self, Duration},
 };
 
 use crate::{
     CACHE_DIR, CHUNKED_LAYER_SIZE_BYTES, ESTIMATED_SPEED_MBPS, LARGE_LAYER_PROGRESS_INTERVAL_SECS,
-    LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MEDIUM_LAYER_THRESHOLD_MB,
-    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS, cache, image,
+    LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
+    MEDIUM_LAYER_THRESHOLD_MB, NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError,
+    RATE_LIMIT_DELAY_MS, cache, image,
     oci::{auth::RegistryAuth, client::Client, manifest::OciImageManifest, reference::Reference},
     state,
     tar_import::{
@@ -40,11 +42,15 @@ struct InputContext {
 /// Coordinates the push workflow so helper functions remain grouped.
 pub struct PushWorkflow<'a> {
     client: &'a Client,
+    chunk_size_bytes: usize,
 }
 
 impl<'a> PushWorkflow<'a> {
-    pub fn new(client: &'a Client) -> Self {
-        Self { client }
+    pub fn new(client: &'a Client, chunk_size_bytes: usize) -> Self {
+        Self {
+            client,
+            chunk_size_bytes,
+        }
     }
 
     pub async fn run(
@@ -401,16 +407,16 @@ impl<'a> PushWorkflow<'a> {
         layer_size_bytes: u64,
     ) -> Result<(), PusherError> {
         println!(
-            "   🔄 Chunk-streaming large layer ({:.1} MB) in {:.0} MB chunks...",
+            "   🔄 Chunk-streaming large layer ({:.1} MB) in {:.0} MB chunks (auto-adjusting)...",
             layer_size_mb,
-            CHUNKED_LAYER_SIZE_BYTES as f64 / (1024.0 * 1024.0)
+            self.chunk_size_bytes as f64 / (1024.0 * 1024.0)
         );
 
         let upload_start = Instant::now();
         let file = tokio::fs::File::open(layer_path).await.map_err(|e| {
             PusherError::CacheError(format!("Failed to open cached layer {}: {}", digest, e))
         })?;
-        let mut reader = BufReader::with_capacity(CHUNKED_LAYER_SIZE_BYTES, file);
+        let mut reader = file;
 
         if layer_size_mb > 1000.0 {
             let estimated_time_min = layer_size_mb / ESTIMATED_SPEED_MBPS / 60.0;
@@ -422,8 +428,14 @@ impl<'a> PushWorkflow<'a> {
         }
 
         let network_start = Instant::now();
-        let progress_handle =
-            create_progress_tracker(layer_size_mb, layer_size_bytes, network_start, digest);
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let progress_handle = create_progress_tracker(
+            layer_size_mb,
+            layer_size_bytes,
+            network_start,
+            digest,
+            Arc::clone(&bytes_sent),
+        );
 
         let upload_result = self
             .client
@@ -432,7 +444,8 @@ impl<'a> PushWorkflow<'a> {
                 auth,
                 &mut reader,
                 digest,
-                CHUNKED_LAYER_SIZE_BYTES,
+                self.chunk_size_bytes,
+                Some(bytes_sent),
             )
             .await;
 
@@ -694,8 +707,30 @@ pub async fn run_push(
     username: Option<String>,
     password: Option<String>,
     registry_override: Option<String>,
+    blob_chunk: Option<usize>,
 ) -> Result<(), PusherError> {
-    PushWorkflow::new(client)
+    let chunk_size_bytes = match blob_chunk {
+        Some(0) => {
+            return Err(PusherError::push_error(
+                "--blob-chunk must be greater than 0 MB",
+            ));
+        }
+        Some(mb) => {
+            let requested = mb.checked_mul(1024 * 1024).ok_or_else(|| {
+                PusherError::push_error("--blob-chunk value is too large for this platform")
+            })?;
+            if requested > MAX_CHUNKED_LAYER_SIZE_BYTES {
+                return Err(PusherError::push_error(format!(
+                    "--blob-chunk cannot exceed {} MB",
+                    MAX_CHUNKED_LAYER_SIZE_BYTES / (1024 * 1024)
+                )));
+            }
+            requested
+        }
+        None => CHUNKED_LAYER_SIZE_BYTES,
+    };
+
+    PushWorkflow::new(client, chunk_size_bytes)
         .run(input, target_image, username, password, registry_override)
         .await
 }
@@ -708,20 +743,12 @@ fn format_size_display(size_mb: f64) -> (f64, &'static str) {
     }
 }
 
-fn calculate_upload_progress(elapsed_secs: u64, layer_size_mb: f64) -> f64 {
-    if elapsed_secs > 10 {
-        let time_factor = elapsed_secs as f64 / (layer_size_mb / 8.0);
-        ((time_factor / (1.0 + time_factor)) * 100.0).min(95.0)
-    } else {
-        10.0
-    }
-}
-
 fn create_progress_tracker(
     layer_size_mb: f64,
     layer_size_bytes: u64,
     network_start: Instant,
     digest: &str,
+    bytes_sent: Arc<AtomicU64>,
 ) -> Option<task::JoinHandle<()>> {
     if layer_size_mb <= LARGE_LAYER_THRESHOLD_MB {
         return None;
@@ -729,6 +756,7 @@ fn create_progress_tracker(
 
     let layer_size_mb_clone = layer_size_mb;
     let network_start_clone = network_start;
+    let bytes_sent_clone = bytes_sent;
     let digest_suffix = digest.chars().skip(digest.len() - 8).collect::<String>();
     let interval_secs = if layer_size_mb > 1000.0 {
         LARGE_LAYER_PROGRESS_INTERVAL_SECS
@@ -744,64 +772,65 @@ fn create_progress_tracker(
             interval.tick().await;
             let elapsed = network_start_clone.elapsed();
 
-            if elapsed.as_secs() > 0 {
-                let elapsed_min = elapsed.as_secs_f64() / 60.0;
-                let estimated_progress_percent =
-                    calculate_upload_progress(elapsed.as_secs(), layer_size_mb_clone);
+            let elapsed_secs = elapsed.as_secs();
 
-                let estimated_transferred_mb =
-                    (estimated_progress_percent / 100.0) * layer_size_mb_clone;
-                let estimated_remaining_mb = layer_size_mb_clone - estimated_transferred_mb;
-                let estimated_transferred_bytes =
-                    (estimated_progress_percent / 100.0) * layer_size_bytes as f64;
-
-                let current_speed_mbps = if elapsed.as_secs() > 5 {
-                    estimated_transferred_mb / elapsed.as_secs_f64()
-                } else {
-                    ESTIMATED_SPEED_MBPS
-                };
-
-                let remaining_time_min = if current_speed_mbps > 0.0 {
-                    estimated_remaining_mb / current_speed_mbps / 60.0
-                } else {
-                    0.0
-                };
-
-                let (transferred_display, unit) = format_size_display(estimated_transferred_mb);
-                let (total_display, _) = format_size_display(layer_size_mb_clone);
-
-                println!(
-                    "   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: ~{:.1} MB/s | ETA: {:.1}min",
-                    progress_counter,
-                    estimated_progress_percent,
-                    transferred_display,
-                    total_display,
-                    unit,
-                    current_speed_mbps,
-                    remaining_time_min
-                );
-
-                if progress_counter % 2 == 0 {
-                    println!(
-                        "   📊 Data transferred: {:.0}/{} bytes | Elapsed: {:.1}min | Layer: ...{}",
-                        estimated_transferred_bytes, layer_size_bytes, elapsed_min, digest_suffix
-                    );
-                }
-
-                if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
-                    let gb_size = layer_size_mb_clone / 1024.0;
-                    let avg_speed = estimated_transferred_mb / elapsed.as_secs_f64();
-                    let completion_percent =
-                        ((estimated_transferred_mb / layer_size_mb_clone) * 100.0).min(95.0);
-
-                    println!(
-                        "   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress",
-                        gb_size, avg_speed, completion_percent
-                    );
-                }
-
-                progress_counter += 1;
+            let sent_bytes = bytes_sent_clone.load(Ordering::Relaxed);
+            if sent_bytes == 0 && elapsed_secs < 5 {
+                continue;
             }
+
+            let elapsed_min = elapsed.as_secs_f64() / 60.0;
+            let sent_mb = sent_bytes as f64 / (1024.0 * 1024.0);
+            let total_mb = layer_size_mb_clone;
+            let percent = if layer_size_bytes > 0 {
+                (sent_bytes as f64 / layer_size_bytes as f64 * 100.0).min(100.0)
+            } else {
+                0.0
+            };
+
+            let speed_mbps = if elapsed_secs > 0 {
+                sent_mb / elapsed.as_secs_f64()
+            } else {
+                0.0
+            };
+            let remaining_mb = (total_mb - sent_mb).max(0.0);
+            let eta_min = if speed_mbps > 0.0 {
+                remaining_mb / speed_mbps / 60.0
+            } else {
+                0.0
+            };
+
+            let (transferred_display, unit) = format_size_display(sent_mb);
+            let (total_display, _) = format_size_display(total_mb);
+
+            println!(
+                "   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: {:.1} MB/s | ETA: {:.1}min",
+                progress_counter,
+                percent,
+                transferred_display,
+                total_display,
+                unit,
+                speed_mbps,
+                eta_min
+            );
+
+            if progress_counter % 2 == 0 {
+                println!(
+                    "   📊 Data transferred: {}/{} bytes | Elapsed: {:.1}min | Layer: ...{}",
+                    sent_bytes, layer_size_bytes, elapsed_min, digest_suffix
+                );
+            }
+
+            if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
+                let gb_size = total_mb / 1024.0;
+                let completion_percent = percent;
+                println!(
+                    "   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress",
+                    gb_size, speed_mbps, completion_percent
+                );
+            }
+
+            progress_counter += 1;
         }
     }))
 }

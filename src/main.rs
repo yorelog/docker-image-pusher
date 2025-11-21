@@ -3,12 +3,11 @@ use thiserror::Error;
 
 mod cache;
 mod image;
-mod oci;
 mod push;
 mod state;
 mod tar_import;
 
-use crate::oci::client::{Client, ClientConfig};
+use oci_core::client::{Client, ClientConfig};
 
 pub const CACHE_DIR: &str = ".cache";
 pub const STREAM_BUFFER_SIZE: usize = 8 * 1024 * 1024;

@@ -13,13 +13,14 @@ use crate::{
     CACHE_DIR, CHUNKED_LAYER_SIZE_BYTES, ESTIMATED_SPEED_MBPS, LARGE_LAYER_PROGRESS_INTERVAL_SECS,
     LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
     MEDIUM_LAYER_THRESHOLD_MB, NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError,
-    RATE_LIMIT_DELAY_MS, cache, image,
-    oci::{auth::RegistryAuth, client::Client, manifest::OciImageManifest, reference::Reference},
-    state,
+    RATE_LIMIT_DELAY_MS, cache, image, state,
     tar_import::{
         TarRepoInfo, build_target_from_tar, import_tar_file, infer_target_from_history,
         tar_repo_info_from_path,
     },
+};
+use oci_core::{
+    auth::RegistryAuth, client::Client, manifest::OciImageManifest, reference::Reference,
 };
 
 /// Captures everything needed to execute a push once analysis is finished.

@@ -11,10 +11,10 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
-use crate::oci::auth::RegistryAuth;
-use crate::oci::errors::OciError;
-use crate::oci::manifest::{OciDescriptor, OciImageManifest};
-use crate::oci::reference::Reference;
+use crate::auth::RegistryAuth;
+use crate::errors::OciError;
+use crate::manifest::{OciDescriptor, OciImageManifest};
+use crate::reference::Reference;
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const OCTET_STREAM: &str = "application/octet-stream";

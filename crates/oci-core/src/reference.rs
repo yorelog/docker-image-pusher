@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::PusherError;
+use crate::errors::OciError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Reference {
@@ -12,10 +12,10 @@ pub struct Reference {
 }
 
 impl Reference {
-    pub fn parse(input: &str) -> Result<Self, PusherError> {
+    pub fn parse(input: &str) -> Result<Self, OciError> {
         let remainder = input.trim();
         if remainder.is_empty() {
-            return Err(PusherError::PullError("Empty image reference".to_string()));
+            return Err(OciError::Reference("Empty image reference".to_string()));
         }
 
         let (registry, rest) = if remainder.contains('/')
@@ -54,7 +54,7 @@ impl Reference {
         }
 
         if repository.is_empty() {
-            return Err(PusherError::PullError(
+            return Err(OciError::Reference(
                 "Repository missing from reference".to_string(),
             ));
         }
@@ -77,7 +77,7 @@ impl Reference {
 }
 
 impl FromStr for Reference {
-    type Err = PusherError;
+    type Err = OciError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s)

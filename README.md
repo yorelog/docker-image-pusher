@@ -33,6 +33,20 @@ This tool implements **streaming-based layer processing** using the OCI client l
 - **Tar importer refactor** – A dedicated `TarImporter` groups manifest parsing, layer extraction, digest calculation, and cache persistence. Extraction progress for oversized layers mirrors the push progress bars so you can see streaming speeds end-to-end.
 - **Vendor cleanup** – Removed the old vendored OCI client copy and its tests; the workspace now relies solely on the published crates, which simplifies audits and shrinks the source tree.
 
+## OCI Core Library
+
+The OCI functionality now lives inside `crates/oci-core`, an MIT-licensed library crate that
+can be embedded in other tools. It exposes:
+
+- `reference` – a no-dependency reference parser with rich `OciError` signals
+- `auth` – helpers for anonymous/basic auth negotiation
+- `client` – an async `reqwest` uploader/downloader that understands chunked blobs,
+  real-time telemetry, and registry-provided chunk hints
+
+`docker-image-pusher` consumes `oci-core` through a normal Cargo path dependency, mirroring how
+Rust itself treats the `core` crate. This keeps the CLI boundary clean while enabling other
+projects to reuse the same stable OCI primitives without pulling in the rest of the binary.
+
 ## 📋 Prerequisites
 
 - **Rust**: Version 1.70 or later

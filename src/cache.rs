@@ -1,8 +1,8 @@
 use crate::PusherError;
 use crate::image;
-use crate::oci::auth::RegistryAuth;
-use crate::oci::client::Client;
-use crate::oci::reference::Reference;
+use oci_core::auth::RegistryAuth;
+use oci_core::client::Client;
+use oci_core::reference::Reference;
 
 use std::path::Path;
 use tokio::io::AsyncWriteExt;

@@ -11,7 +11,9 @@ use tokio::{
 use crate::{
     CHUNKED_LAYER_SIZE_BYTES, ESTIMATED_SPEED_MBPS, LARGE_LAYER_PROGRESS_INTERVAL_SECS,
     LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
-    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS, state,
+    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS,
+    progress_display::docker_like_progress_reporter,
+    state,
     tar_import::{
         TarExtraction, TarRepoInfo, build_target_from_tar, extract_tar_archive_with_sender,
         infer_target_from_history, tar_repo_info_from_path,
@@ -243,6 +245,7 @@ impl<'a> PushWorkflow<'a> {
                 normal_interval_secs: NORMAL_LAYER_PROGRESS_INTERVAL_SECS,
                 estimated_speed_mbps: ESTIMATED_SPEED_MBPS,
             },
+            progress_reporter: Some(docker_like_progress_reporter()),
         };
 
         let uploader =

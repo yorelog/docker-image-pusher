@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
+mod progress_display;
 mod push;
 mod save;
 mod state;

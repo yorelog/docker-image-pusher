@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -54,7 +54,6 @@ struct LayerFile {
     size: u64,
     media_type: String,
 }
-
 
 /// Variant of [`extract_tar_archive`] that also emits each extracted layer over the provided
 /// channel, allowing callers to start uploading while extraction continues.
@@ -166,6 +165,8 @@ fn extract_layers_and_config(
     let mut path_to_digest: HashMap<String, String> = HashMap::new();
     let mut layer_files: HashMap<String, LayerFile> = HashMap::new();
     let mut buffer = vec![0u8; STREAM_BUFFER_SIZE];
+    let layer_whitelist: HashSet<&str> =
+        manifest.layers.iter().map(|layer| layer.as_str()).collect();
 
     for entry_result in archive
         .entries()
@@ -192,7 +193,7 @@ fn extract_layers_and_config(
             continue;
         }
 
-        if !manifest.layers.iter().any(|layer| layer == &path_str) {
+        if !layer_whitelist.contains(path_str.as_str()) {
             continue;
         }
 

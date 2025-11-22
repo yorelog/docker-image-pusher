@@ -1,18 +1,24 @@
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
 use tokio::task;
+use tokio::fs::File;
+use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
 use crate::auth::RegistryAuth;
 use crate::client::Client;
 use crate::errors::OciError;
+use crate::progress::{
+	LayerProgressComplete,
+	LayerProgressInit,
+	LayerProgressUpdate,
+	ProgressReporterHandle,
+};
 use crate::reference::Reference;
 
 /// Metadata describing a locally extracted layer on disk.
@@ -31,7 +37,6 @@ impl LocalLayer {
 }
 
 /// Controls how uploads are scheduled and how progress is reported.
-#[derive(Debug, Clone)]
 pub struct LayerUploadOptions {
 	pub chunk_size_bytes: usize,
 	pub large_layer_threshold_bytes: u64,
@@ -39,6 +44,35 @@ pub struct LayerUploadOptions {
 	pub rate_limit_delay_ms: u64,
 	pub concurrency: usize,
 	pub progress: ProgressOptions,
+	pub progress_reporter: Option<ProgressReporterHandle>,
+}
+
+impl Clone for LayerUploadOptions {
+	fn clone(&self) -> Self {
+		Self {
+			chunk_size_bytes: self.chunk_size_bytes,
+			large_layer_threshold_bytes: self.large_layer_threshold_bytes,
+			medium_layer_threshold_mb: self.medium_layer_threshold_mb,
+			rate_limit_delay_ms: self.rate_limit_delay_ms,
+			concurrency: self.concurrency,
+			progress: self.progress.clone(),
+			progress_reporter: self.progress_reporter.clone(),
+		}
+	}
+}
+
+impl fmt::Debug for LayerUploadOptions {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("LayerUploadOptions")
+			.field("chunk_size_bytes", &self.chunk_size_bytes)
+			.field("large_layer_threshold_bytes", &self.large_layer_threshold_bytes)
+			.field("medium_layer_threshold_mb", &self.medium_layer_threshold_mb)
+			.field("rate_limit_delay_ms", &self.rate_limit_delay_ms)
+			.field("concurrency", &self.concurrency)
+			.field("progress", &self.progress)
+			.field("progress_reporter", &self.progress_reporter.is_some())
+			.finish()
+	}
 }
 
 impl LayerUploadOptions {
@@ -171,8 +205,8 @@ async fn upload_single_layer(
 
 	println!("   ✅ Successfully uploaded layer {}", layer.digest);
 
-	if layer_size_mb > options.medium_layer_threshold_mb {
-		time::sleep(Duration::from_millis(options.rate_limit_delay_ms)).await;
+	if layer_size_mb > options.medium_layer_threshold_mb && options.rate_limit_delay_ms > 0 {
+		task::yield_now().await;
 	}
 
 	Ok(LayerUploadOutcome {
@@ -243,11 +277,28 @@ async fn upload_large_layer(
 	options: &LayerUploadOptions,
 ) -> Result<(), OciError> {
 	let layer_size_mb = layer.size_mb();
+	let chunk_size_mb = options.chunk_size_bytes as f64 / (1024.0 * 1024.0);
 	println!(
 		"   🔄 Chunk-streaming large layer ({:.1} MB) in {:.0} MB chunks (auto-adjusting)...",
-		layer_size_mb,
-		options.chunk_size_bytes as f64 / (1024.0 * 1024.0)
+		layer_size_mb, chunk_size_mb
 	);
+	let estimated_chunks = ((layer.size as f64) / options.chunk_size_bytes as f64)
+		.ceil()
+		.max(1.0) as u64;
+	if let Some(reporter) = options.progress_reporter.as_ref() {
+		reporter.on_layer_start(LayerProgressInit {
+			digest: layer.digest.clone(),
+			total_bytes: layer.size,
+			chunk_size_bytes: options.chunk_size_bytes,
+			estimated_chunks,
+		});
+	} else {
+		println!(
+			"   🧮 Planning roughly {} chunk(s) (~{:.1} MB each)",
+			estimated_chunks,
+			chunk_size_mb
+		);
+	}
 
 	let upload_start = Instant::now();
 	let mut file = File::open(&layer.path).await?;
@@ -261,24 +312,16 @@ async fn upload_large_layer(
 		);
 	}
 
-	let mut head_buffer = vec![0u8; options.chunk_size_bytes.max(1)];
-	let initial_read = file.read(&mut head_buffer).await?;
-	head_buffer.truncate(initial_read);
-	let initial_chunk = if head_buffer.is_empty() {
-		None
-	} else {
-		Some(head_buffer)
-	};
-
 	let network_start = Instant::now();
 	let bytes_sent = Arc::new(AtomicU64::new(0));
 	let progress_handle = create_progress_tracker(
 		layer_size_mb,
 		layer.size,
 		network_start,
-		&layer.digest,
+		layer.digest.clone(),
 		Arc::clone(&bytes_sent),
 		&options.progress,
+		options.progress_reporter.clone(),
 	);
 
 	client
@@ -288,8 +331,9 @@ async fn upload_large_layer(
 			&mut file,
 			&layer.digest,
 			options.chunk_size_bytes,
+			Some(layer.size),
+			options.progress_reporter.clone(),
 			Some(bytes_sent),
-			initial_chunk,
 		)
 		.await?;
 
@@ -321,6 +365,15 @@ async fn upload_large_layer(
 		);
 	}
 
+	if let Some(reporter) = options.progress_reporter.as_ref() {
+		reporter.on_layer_complete(LayerProgressComplete {
+			digest: layer.digest.clone(),
+			total_bytes: layer.size,
+			elapsed: total_duration,
+			average_mbps: upload_speed,
+		});
+	}
+
 	Ok(())
 }
 
@@ -328,18 +381,20 @@ fn create_progress_tracker(
 	layer_size_mb: f64,
 	layer_size_bytes: u64,
 	network_start: Instant,
-	digest: &str,
+	digest: String,
 	bytes_sent: Arc<AtomicU64>,
 	progress: &ProgressOptions,
+	reporter: Option<ProgressReporterHandle>,
 ) -> Option<task::JoinHandle<()>> {
 	if layer_size_mb <= progress.large_layer_threshold_mb {
 		return None;
 	}
 
-	let layer_size_mb_clone = layer_size_mb;
-	let network_start_clone = network_start;
-	let bytes_sent_clone = bytes_sent;
-	let digest_suffix = digest.chars().skip(digest.len().saturating_sub(8)).collect::<String>();
+	let reporter = match reporter {
+		Some(handle) => handle,
+		None => return None,
+	};
+
 	let interval_secs = if layer_size_mb > 1000.0 {
 		progress.large_interval_secs
 	} else {
@@ -348,80 +403,36 @@ fn create_progress_tracker(
 
 	Some(tokio::spawn(async move {
 		let mut interval = time::interval(Duration::from_secs(interval_secs));
-		let mut progress_counter = 1;
-
 		loop {
 			interval.tick().await;
-			let elapsed = network_start_clone.elapsed();
-
-			let elapsed_secs = elapsed.as_secs();
-
-			let sent_bytes = bytes_sent_clone.load(Ordering::Relaxed);
-			if sent_bytes == 0 && elapsed_secs < 5 {
+			let elapsed = network_start.elapsed();
+			let sent_bytes = bytes_sent.load(Ordering::Relaxed);
+			if sent_bytes == 0 && elapsed.as_secs() < 5 {
 				continue;
 			}
 
-			let elapsed_min = elapsed.as_secs_f64() / 60.0;
 			let sent_mb = sent_bytes as f64 / (1024.0 * 1024.0);
-			let total_mb = layer_size_mb_clone;
-			let percent = if layer_size_bytes > 0 {
-				(sent_bytes as f64 / layer_size_bytes as f64 * 100.0).min(100.0)
-			} else {
-				0.0
-			};
-
-			let speed_mbps = if elapsed_secs > 0 {
+			let speed_mbps = if elapsed.as_secs() > 0 {
 				sent_mb / elapsed.as_secs_f64()
 			} else {
 				0.0
 			};
-			let remaining_mb = (total_mb - sent_mb).max(0.0);
-			let eta_min = if speed_mbps > 0.0 {
-				remaining_mb / speed_mbps / 60.0
+			let remaining_mb = (layer_size_mb - sent_mb).max(0.0);
+			let eta_secs = if speed_mbps > 0.0 {
+				Some(remaining_mb / speed_mbps)
 			} else {
-				0.0
+				None
 			};
 
-			let (transferred_display, unit) = format_size_display(sent_mb);
-			let (total_display, _) = format_size_display(total_mb);
-
-			println!(
-				"   ⏳ Upload progress #{}: {:.1}% | {:.1}/{:.1} {} | Speed: {:.1} MB/s | ETA: {:.1}min",
-				progress_counter,
-				percent,
-				transferred_display,
-				total_display,
-				unit,
+			reporter.on_layer_progress(LayerProgressUpdate {
+				digest: digest.clone(),
+				sent_bytes,
+				total_bytes: layer_size_bytes,
+				elapsed,
 				speed_mbps,
-				eta_min
-			);
-
-			if progress_counter % 2 == 0 {
-				println!(
-					"   📊 Data transferred: {}/{} bytes | Elapsed: {:.1}min | Layer: ...{}",
-					sent_bytes, layer_size_bytes, elapsed_min, digest_suffix
-				);
-			}
-
-			if progress_counter % 3 == 0 && layer_size_mb_clone > 1000.0 {
-				let gb_size = total_mb / 1024.0;
-				let completion_percent = percent;
-				println!(
-					"   📈 Network: {:.2} GB total | Avg: {:.1} MB/s | Progress: {:.1}% | Large transfer in progress",
-					gb_size, speed_mbps, completion_percent
-				);
-			}
-
-			progress_counter += 1;
+				eta_seconds: eta_secs,
+			});
 		}
 	}))
-}
-
-fn format_size_display(size_mb: f64) -> (f64, &'static str) {
-	if size_mb > 1024.0 {
-		(size_mb / 1024.0, "GB")
-	} else {
-		(size_mb, "MB")
-	}
 }
 

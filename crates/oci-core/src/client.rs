@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::stream::StreamExt;
 use reqwest::header::CONTENT_LENGTH;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, LOCATION, WWW_AUTHENTICATE};
@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use crate::auth::RegistryAuth;
 use crate::errors::OciError;
 use crate::manifest::{OciDescriptor, OciImageManifest};
+use crate::progress::{ChunkTransferEvent, ProgressReporterHandle};
 use crate::reference::Reference;
 
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
@@ -45,6 +46,11 @@ fn oci_debug_enabled() -> bool {
 fn upload_debug_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| env_flag("OCI_DEBUG_UPLOAD") || oci_debug_enabled())
+}
+
+fn chunk_trace_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| env_flag("OCI_CHUNK_TRACE") || upload_debug_enabled())
 }
 
 fn log_debug<F>(message: F)
@@ -497,12 +503,18 @@ impl Client {
         reader: &mut R,
         digest: &str,
         chunk_size: usize,
+        total_size_bytes: Option<u64>,
+        reporter: Option<ProgressReporterHandle>,
         progress: Option<Arc<AtomicU64>>,
-        initial_chunk: Option<Vec<u8>>,
     ) -> Result<(), OciError> {
         let (mut upload_url, initial_chunk_hint) = self.begin_upload(reference, auth).await?;
         let scope = Self::push_scope(reference);
         let mut effective_chunk = chunk_size.max(1);
+        let mut chunk_seq: u64 = 0;
+        let mut total_sent_bytes: u64 = 0;
+        let mut largest_chunk: usize = 0;
+        let total_size_hint = total_size_bytes.filter(|value| *value > 0);
+        let chunk_trace = chunk_trace_enabled();
         if let Some(min_required) = initial_chunk_hint {
             if min_required > effective_chunk {
                 println!(
@@ -517,46 +529,44 @@ impl Client {
             println!("   🔗 Upload session started at {}", upload_url);
         }
 
-        if let Some(mut chunk_vec) = initial_chunk {
-            if let Some(min_required) = initial_chunk_hint {
-                if chunk_vec.len() < min_required {
-                    Self::top_up_initial_chunk(reader, &mut chunk_vec, min_required).await?;
-                }
-            }
-            if !chunk_vec.is_empty() {
-                let (next_url, next_hint) = self
-                    .transmit_chunk(upload_url, auth, &scope, chunk_vec, progress.as_ref())
-                    .await?;
-                upload_url = next_url;
-                if let Some(min_required) = next_hint {
-                    if min_required > effective_chunk {
-                        println!(
-                            "   📏 Registry increased minimum chunk to {:.0} MB; adjusting",
-                            min_required as f64 / (1024.0 * 1024.0)
-                        );
-                        effective_chunk = min_required;
-                    }
-                }
-            }
-        }
-
-        let mut buffer = vec![0u8; effective_chunk];
+        let mut buffer = BytesMut::with_capacity(effective_chunk);
 
         loop {
-            let read = reader.read(&mut buffer).await?;
-            if read == 0 {
+            while buffer.len() < effective_chunk {
+                let read = reader.read_buf(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+            }
+
+            if buffer.is_empty() {
                 break;
             }
+
+            let chunk_bytes = buffer.split().freeze();
+            let chunk_len = chunk_bytes.len();
             let (next_url, next_hint) = self
                 .transmit_chunk(
                     upload_url,
                     auth,
                     &scope,
-                    buffer[..read].to_vec(),
+                    chunk_bytes,
                     progress.as_ref(),
                 )
                 .await?;
             upload_url = next_url;
+            chunk_seq += 1;
+            total_sent_bytes += chunk_len as u64;
+            largest_chunk = largest_chunk.max(chunk_len);
+            Self::emit_chunk_event(
+                digest,
+                chunk_seq,
+                chunk_len,
+                total_sent_bytes,
+                total_size_hint,
+                chunk_trace,
+                reporter.as_ref(),
+            );
 
             if let Some(min_required) = next_hint {
                 if min_required > effective_chunk {
@@ -565,10 +575,19 @@ impl Client {
                         min_required as f64 / (1024.0 * 1024.0)
                     );
                     effective_chunk = min_required;
-                    buffer.resize(effective_chunk, 0);
+                    buffer = BytesMut::with_capacity(effective_chunk);
                 }
             }
         }
+
+        Self::log_chunk_summary(
+            digest,
+            chunk_seq,
+            total_sent_bytes,
+            largest_chunk,
+            reporter.as_ref(),
+            chunk_trace,
+        );
 
         upload_url.query_pairs_mut().append_pair("digest", digest);
         let mut final_headers = HeaderMap::new();
@@ -596,12 +615,90 @@ impl Client {
         Ok(())
     }
 
+    fn emit_chunk_trace_line(
+        digest: &str,
+        chunk_index: u64,
+        chunk_len: usize,
+        total_sent_bytes: u64,
+        total_size_hint: Option<u64>,
+        chunk_trace: bool,
+    ) {
+        if !chunk_trace {
+            return;
+        }
+        let chunk_mb = chunk_len as f64 / (1024.0 * 1024.0);
+        if let Some(total) = total_size_hint {
+            let percent = (total_sent_bytes as f64 / total as f64 * 100.0).min(100.0);
+            println!(
+                "   🔹 {} chunk #{chunk_index}: {:.2} MB ({:.1}% cumulative)",
+                digest,
+                chunk_mb,
+                percent
+            );
+        } else {
+            println!(
+                "   🔹 {} chunk #{chunk_index}: {:.2} MB (cumulative {} bytes)",
+                digest,
+                chunk_mb,
+                total_sent_bytes
+            );
+        }
+    }
+
+    fn emit_chunk_event(
+        digest: &str,
+        chunk_index: u64,
+        chunk_len: usize,
+        total_sent_bytes: u64,
+        total_size_hint: Option<u64>,
+        chunk_trace: bool,
+        reporter: Option<&ProgressReporterHandle>,
+    ) {
+        Self::emit_chunk_trace_line(
+            digest,
+            chunk_index,
+            chunk_len,
+            total_sent_bytes,
+            total_size_hint,
+            chunk_trace,
+        );
+        if let Some(handle) = reporter {
+            handle.on_chunk_transferred(ChunkTransferEvent {
+                digest: digest.to_string(),
+                chunk_index,
+                chunk_bytes: chunk_len,
+                total_transferred: total_sent_bytes,
+                total_bytes: total_size_hint,
+            });
+        }
+    }
+
+    fn log_chunk_summary(
+        digest: &str,
+        chunk_seq: u64,
+        total_sent_bytes: u64,
+        largest_chunk: usize,
+        reporter: Option<&ProgressReporterHandle>,
+        chunk_trace: bool,
+    ) {
+        if reporter.is_none() || chunk_trace {
+            let largest_mb = largest_chunk as f64 / (1024.0 * 1024.0);
+            println!(
+                "   🧾 {}: {} chunk(s) uploaded, largest chunk {:.2} MB, total {} bytes",
+                digest,
+                chunk_seq,
+                largest_mb,
+                total_sent_bytes
+            );
+        }
+    }
+
     async fn transmit_chunk(
         &self,
         upload_url: Url,
         auth: &RegistryAuth,
         scope: &str,
-        chunk: Vec<u8>,
+        chunk: Bytes,
         progress: Option<&Arc<AtomicU64>>,
     ) -> Result<(Url, Option<usize>), OciError> {
         let chunk_len = chunk.len();
@@ -645,23 +742,6 @@ impl Client {
         }
 
         Ok((next_url, Self::parse_chunk_hint(resp.headers())))
-    }
-
-    async fn top_up_initial_chunk<R: AsyncRead + Unpin + Send>(
-        reader: &mut R,
-        chunk: &mut Vec<u8>,
-        min_required: usize,
-    ) -> Result<(), OciError> {
-        while chunk.len() < min_required {
-            let remaining = min_required - chunk.len();
-            let mut pad = vec![0u8; remaining.min(4 * 1024 * 1024).max(1)];
-            let read = reader.read(&mut pad).await?;
-            if read == 0 {
-                break;
-            }
-            chunk.extend_from_slice(&pad[..read]);
-        }
-        Ok(())
     }
 
     pub async fn push_manifest(

@@ -12,6 +12,8 @@ pub enum OciError {
     Reference(String),
     #[error("IO error: {0}")]
     Io(String),
+    #[error("Upload session reset required: {0}")]
+    UploadReset(String),
     #[error("Unexpected status {status}: {message}")]
     Status { status: u16, message: String },
 }

@@ -317,9 +317,14 @@ impl Client {
             )
             .await?;
         if resp.status() != StatusCode::ACCEPTED {
+            let status = resp.status();
+            let message = resp.text().await.unwrap_or_default();
+            if Self::requires_upload_reset(status, &message) {
+                return Err(OciError::UploadReset(message));
+            }
             return Err(OciError::Status {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message,
             });
         }
         let chunk_hint = Self::parse_chunk_hint(resp.headers());
@@ -691,6 +696,18 @@ impl Client {
                 total_sent_bytes
             );
         }
+    }
+
+    fn requires_upload_reset(status: StatusCode, body: &str) -> bool {
+        if status == StatusCode::NOT_FOUND || status == StatusCode::BAD_REQUEST {
+            let lowered = body.to_ascii_lowercase();
+            return lowered.contains("blob_upload_invalid")
+                || lowered.contains("blob upload invalid")
+                || lowered.contains("blob upload unknown")
+                || lowered.contains("blob unknown")
+                || lowered.contains("upload invalid");
+        }
+        false
     }
 
     async fn transmit_chunk(

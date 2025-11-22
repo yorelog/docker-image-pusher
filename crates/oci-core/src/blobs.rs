@@ -10,15 +10,13 @@ use tokio::fs::File;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 
+const MAX_STREAM_RETRIES: usize = 2;
+const MAX_AUTO_CHUNK_BYTES: usize = 256 * 1024 * 1024;
+
 use crate::auth::RegistryAuth;
 use crate::client::Client;
 use crate::errors::OciError;
-use crate::progress::{
-	LayerProgressComplete,
-	LayerProgressInit,
-	LayerProgressUpdate,
-	ProgressReporterHandle,
-};
+use crate::progress::{LayerProgressComplete, LayerProgressInit, ProgressReporterHandle};
 use crate::reference::Reference;
 
 /// Metadata describing a locally extracted layer on disk.
@@ -301,7 +299,6 @@ async fn upload_large_layer(
 	}
 
 	let upload_start = Instant::now();
-	let mut file = File::open(&layer.path).await?;
 
 	if layer_size_mb > 1000.0 {
 		let estimated_time_min = layer_size_mb / options.progress.estimated_speed_mbps / 60.0;
@@ -314,6 +311,7 @@ async fn upload_large_layer(
 
 	let network_start = Instant::now();
 	let bytes_sent = Arc::new(AtomicU64::new(0));
+	let reporter_active = options.progress_reporter.is_some();
 	let progress_handle = create_progress_tracker(
 		layer_size_mb,
 		layer.size,
@@ -321,23 +319,79 @@ async fn upload_large_layer(
 		layer.digest.clone(),
 		Arc::clone(&bytes_sent),
 		&options.progress,
-		options.progress_reporter.clone(),
+		reporter_active,
 	);
+	let progress_counter = if reporter_active {
+		None
+	} else {
+		Some(Arc::clone(&bytes_sent))
+	};
 
-	client
-		.push_blob_stream(
-			reference,
-			auth,
-			&mut file,
-			&layer.digest,
-			options.chunk_size_bytes,
-			Some(layer.size),
-			options.progress_reporter.clone(),
-			Some(bytes_sent),
-		)
-		.await?;
+	let mut adaptive_chunk_bytes = options.chunk_size_bytes;
+	let mut attempt = 0;
+	loop {
+		if let Some(counter) = progress_counter.as_ref() {
+			counter.store(0, Ordering::Relaxed);
+		}
+		let mut file = File::open(&layer.path).await?;
+		if attempt > 0 {
+			println!(
+				"   🔁 Upload session reset by registry; restarting stream (attempt {}/{})",
+				attempt + 1,
+				MAX_STREAM_RETRIES + 1
+			);
+		}
+		match client
+			.push_blob_stream(
+				reference,
+				auth,
+				&mut file,
+				&layer.digest,
+				adaptive_chunk_bytes,
+				Some(layer.size),
+				options.progress_reporter.clone(),
+				progress_counter.as_ref().map(Arc::clone),
+			)
+			.await
+		{
+			Ok(_) => break,
+			Err(OciError::UploadReset(reason)) => {
+				if attempt >= MAX_STREAM_RETRIES {
+					if let Some(handle) = &progress_handle {
+						handle.abort();
+					}
+					return Err(OciError::UploadReset(format!(
+						"{} (after {} retries)",
+						reason,
+						MAX_STREAM_RETRIES + 1
+					)));
+				}
+				attempt += 1;
+				let trimmed = reason.chars().take(160).collect::<String>();
+				println!(
+					"   ⚠️  Registry invalidated upload session: {}",
+					trimmed
+				);
+				let new_size = bump_chunk_size(adaptive_chunk_bytes);
+				if new_size != adaptive_chunk_bytes {
+					adaptive_chunk_bytes = new_size;
+					println!(
+						"   📏 Increasing chunk size to {:.0} MB to reduce PATCH count",
+						adaptive_chunk_bytes as f64 / (1024.0 * 1024.0)
+					);
+				}
+				continue;
+			}
+			Err(err) => {
+				if let Some(handle) = &progress_handle {
+					handle.abort();
+				}
+				return Err(err);
+			}
+		}
+	}
 
-	if let Some(handle) = progress_handle {
+	if let Some(handle) = &progress_handle {
 		handle.abort();
 	}
 
@@ -384,22 +438,18 @@ fn create_progress_tracker(
 	digest: String,
 	bytes_sent: Arc<AtomicU64>,
 	progress: &ProgressOptions,
-	reporter: Option<ProgressReporterHandle>,
+	reporter_active: bool,
 ) -> Option<task::JoinHandle<()>> {
-	if layer_size_mb <= progress.large_layer_threshold_mb {
+	if reporter_active || layer_size_mb <= progress.large_layer_threshold_mb {
 		return None;
 	}
-
-	let reporter = match reporter {
-		Some(handle) => handle,
-		None => return None,
-	};
 
 	let interval_secs = if layer_size_mb > 1000.0 {
 		progress.large_interval_secs
 	} else {
 		progress.normal_interval_secs
 	};
+	let label = short_digest(&digest);
 
 	Some(tokio::spawn(async move {
 		let mut interval = time::interval(Duration::from_secs(interval_secs));
@@ -412,27 +462,67 @@ fn create_progress_tracker(
 			}
 
 			let sent_mb = sent_bytes as f64 / (1024.0 * 1024.0);
+			let percent = if layer_size_bytes > 0 {
+				(sent_bytes as f64 / layer_size_bytes as f64 * 100.0).min(100.0)
+			} else {
+				0.0
+			};
 			let speed_mbps = if elapsed.as_secs() > 0 {
 				sent_mb / elapsed.as_secs_f64()
 			} else {
 				0.0
 			};
 			let remaining_mb = (layer_size_mb - sent_mb).max(0.0);
-			let eta_secs = if speed_mbps > 0.0 {
-				Some(remaining_mb / speed_mbps)
+			let eta_display = if speed_mbps > 0.0 {
+				format_eta(remaining_mb / speed_mbps)
 			} else {
-				None
+				"--".to_string()
 			};
 
-			reporter.on_layer_progress(LayerProgressUpdate {
-				digest: digest.clone(),
-				sent_bytes,
-				total_bytes: layer_size_bytes,
-				elapsed,
+			println!(
+				"   {} uploading {:.1}% ({:.1}/{:.1} MB) @ {:.1} MB/s ETA {}",
+				label,
+				percent,
+				sent_mb,
+				layer_size_mb,
 				speed_mbps,
-				eta_seconds: eta_secs,
-			});
+				eta_display
+			);
 		}
 	}))
+}
+
+fn bump_chunk_size(current: usize) -> usize {
+	if current >= MAX_AUTO_CHUNK_BYTES {
+		current
+	} else {
+		current
+			.saturating_mul(2)
+			.min(MAX_AUTO_CHUNK_BYTES)
+	}
+}
+
+fn short_digest(digest: &str) -> String {
+	let short = digest.split(':').last().unwrap_or(digest);
+	let label: String = short.chars().take(12).collect();
+	if label.is_empty() {
+		digest.to_string()
+	} else {
+		label
+	}
+}
+
+fn format_eta(seconds: f64) -> String {
+	if !seconds.is_finite() {
+		return "--".to_string();
+	}
+	let total = seconds.max(0.0).round() as u64;
+	let minutes = total / 60;
+	let secs = total % 60;
+	if minutes == 0 {
+		format!("{}s", secs)
+	} else {
+		format!("{}m{:02}s", minutes, secs)
+	}
 }
 

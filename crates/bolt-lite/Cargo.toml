@@ -6,8 +6,10 @@ authors = ["yorelog <yorelog@gmail.com>"]
 description = "Minimal read-only BoltDB parser for containerd metadata"
 readme = "README.md"
 license = "MIT"
-keywords = [""]
-categories = [""]
+repository = "https://github.com/yorelog/docker-image-pusher"
+documentation = "https://docs.rs/bolt-lite"
+homepage = "https://github.com/yorelog/docker-image-pusher"
+keywords = ["boltdb", "containerd", "metadata", "read-only"]
 
 
 [dependencies]

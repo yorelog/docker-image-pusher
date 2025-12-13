@@ -45,7 +45,7 @@ tempfile = "3.13"
 sha2 = "0.10"
 
 # Internal OCI library
-oci-core = { version = "0.1.0", path = "crates/oci-core" }
+oci-core = { version = "0.1.1", path = "crates/oci-core" }
 
 # Containerd metadata/content reader
 containerd-store = { version = "0.1.0", path = "crates/containerd-store" }

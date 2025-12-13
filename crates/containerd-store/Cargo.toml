@@ -6,8 +6,10 @@ authors = ["yorelog <yorelog@gmail.com>"]
 description = "Read-only access to containerd content and metadata for air-gapped image export"
 license = "MIT"
 readme = "README.md"
-keywords = [""]
-categories = [""]
+repository = "https://github.com/yorelog/docker-image-pusher"
+documentation = "https://docs.rs/containerd-store"
+homepage = "https://github.com/yorelog/docker-image-pusher"
+keywords = ["containerd", "oci", "registry", "export", "metadata"]
 
 [features]
 bucket-logging = []

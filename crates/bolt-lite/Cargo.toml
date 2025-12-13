@@ -1,0 +1,14 @@
+[package]
+name = "bolt-lite"
+version = "0.1.0"
+edition = "2024"
+authors = ["yorelog <yorelog@gmail.com>"]
+description = "Minimal read-only BoltDB parser for containerd metadata"
+readme = "README.md"
+license = "MIT"
+keywords = [""]
+categories = [""]
+
+
+[dependencies]
+thiserror = "2.0"

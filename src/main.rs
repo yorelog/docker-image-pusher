@@ -3,9 +3,9 @@ use thiserror::Error;
 
 mod progress_display;
 mod push;
-mod save;
 mod state;
 mod tar_import;
+mod containerd_import;
 
 use oci_core::client::{Client, ClientConfig};
 
@@ -36,12 +36,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Push a docker-save tarball directly to a registry
+    /// Push from a docker-save tarball or directly from a containerd store
     Push {
-        /// Docker-save tar path
-        #[arg(value_name = "TAR")]
-        tar: String,
-        /// Override the destination reference (defaults to inference)
+        /// Docker-save tar path (use this to push from a tarball)
+        #[arg(long, value_name = "TAR")]
+        tar: Option<String>,
+        /// Containerd root directory (defaults to ~/.local/share/containerd)
+        #[arg(long, value_name = "DIR")]
+        root: Option<String>,
+        /// Namespace in containerd (e.g., "default")
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
+        /// Image reference when pushing from containerd (e.g., "busybox:latest")
+        #[arg(long, value_name = "IMAGE")]
+        image: Option<String>,
+        /// Override the destination reference (defaults to the source image)
         #[arg(short, long)]
         target: Option<String>,
         /// Force a specific registry hostname
@@ -57,8 +66,33 @@ enum Commands {
         #[arg(long = "blob-chunk", value_name = "MB")]
         blob_chunk: Option<usize>,
     },
-    /// Save local container images to tar archives
-    Save(save::SaveArgs),
+    /// Save images from a containerd store into a portable folder or tarball
+    Save {
+        /// Containerd root directory (defaults to ~/.local/share/containerd)
+        #[arg(long, value_name = "DIR")]
+        root: Option<String>,
+        /// Namespace in containerd (e.g., "default")
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
+        /// Image reference(s) (e.g., "busybox:latest")
+        #[arg(value_name = "IMAGE", num_args = 1..)]
+        images: Vec<String>,
+        /// Output directory (or tar path if you tar it yourself afterwards)
+        #[arg(long, value_name = "OUT")] 
+        out: String,
+        /// Optional manifest digest to bypass metadata lookup (e.g., sha256:abcd...)
+        #[arg(long, value_name = "DIGEST")] 
+        digest: Option<String>,
+    },
+    /// List images recorded in containerd metadata.db
+    ListContainerd {
+        /// Containerd root directory (defaults to ~/.local/share containerd)
+        #[arg(long, value_name = "DIR")]
+        root: Option<String>,
+        /// Namespace in containerd (e.g., "default")
+        #[arg(long, value_name = "NS", default_value = "default")]
+        namespace: String,
+    },
     /// Persist credentials for a registry so pushes can reuse them
     Login {
         /// Registry hostname such as registry.example.com
@@ -113,19 +147,53 @@ async fn main() -> Result<(), PusherError> {
     match cli.command {
         Commands::Push {
             tar,
+            root,
+            namespace,
+            image,
             target,
+            registry,
             username,
             password,
-            registry,
             blob_chunk,
         } => {
-            push::run_push(
-                &client, &tar, target, username, password, registry, blob_chunk,
-            )
-            .await?;
+            if let Some(tar_path) = tar {
+                push::run_push(
+                    &client,
+                    &tar_path,
+                    target,
+                    username,
+                    password,
+                    registry,
+                    blob_chunk,
+                )
+                .await?;
+            } else {
+                let image = image.ok_or_else(|| PusherError::push_error("--image is required when pushing from containerd"))?;
+                containerd_import::run_push_containerd(
+                    &client,
+                    root.as_deref(),
+                    &namespace,
+                    &image,
+                    target,
+                    username,
+                    password,
+                    registry,
+                    blob_chunk,
+                )
+                .await?;
+            }
         }
-        Commands::Save(args) => {
-            save::run_save(args).await?;
+        Commands::Save { root, namespace, images, out, digest } => {
+            containerd_import::export_images(
+                root.as_deref(),
+                &namespace,
+                &images,
+                &out,
+                digest.as_deref(),
+            ).await?;
+        }
+        Commands::ListContainerd { root, namespace } => {
+            containerd_import::list_images(root.as_deref(), &namespace).await?;
         }
         Commands::Login {
             registry,

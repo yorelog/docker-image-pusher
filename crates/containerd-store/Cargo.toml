@@ -1,0 +1,22 @@
+[package]
+name = "containerd-store"
+version = "0.1.0"
+edition = "2024"
+authors = ["yorelog <yorelog@gmail.com>"]
+description = "Read-only access to containerd content and metadata for air-gapped image export"
+license = "MIT"
+readme = "README.md"
+keywords = [""]
+categories = [""]
+
+[features]
+bucket-logging = []
+
+[dependencies]
+bolt-lite = { path = "../bolt-lite" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+sha2 = "0.10"
+anyhow = "1.0"
+tempfile = "3.10"

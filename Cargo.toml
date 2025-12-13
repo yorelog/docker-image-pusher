@@ -1,6 +1,6 @@
 [package]
 name = "docker-image-pusher"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 authors = ["yorelog <yorelog@gmail.com>"]
 description = "A memory-optimized Docker image transfer tool for handling large images efficiently"
@@ -47,7 +47,17 @@ sha2 = "0.10"
 # Internal OCI library
 oci-core = { version = "0.1.0", path = "crates/oci-core" }
 
+# Containerd metadata/content reader
+containerd-store = { path = "crates/containerd-store" }
+
+# Minimal Bolt reader for containerd validation
+bolt-lite = { path = "crates/bolt-lite" }
+
 # CLI helpers
 which = "8.0"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+
 
 

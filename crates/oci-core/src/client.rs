@@ -767,6 +767,19 @@ impl Client {
         manifest: &OciImageManifest,
         auth: &RegistryAuth,
     ) -> Result<String, OciError> {
+        let body = serde_json::to_vec(manifest)
+            .map_err(|e| OciError::InvalidResponse(format!("Failed to encode manifest: {}", e)))?;
+        let mt = manifest.media_type.as_str();
+        self.push_manifest_bytes(reference, mt, &body, auth).await
+    }
+
+    pub async fn push_manifest_bytes(
+        &self,
+        reference: &Reference,
+        media_type: &str,
+        body: &[u8],
+        auth: &RegistryAuth,
+    ) -> Result<String, OciError> {
         let tag = reference
             .tag
             .as_ref()
@@ -777,9 +790,10 @@ impl Client {
             .push("manifests")
             .push(tag);
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(MANIFEST_MEDIA_TYPE));
-        let body = serde_json::to_vec(manifest)
-            .map_err(|e| OciError::InvalidResponse(format!("Failed to encode manifest: {}", e)))?;
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_str(media_type).unwrap_or_else(|_| HeaderValue::from_static(MANIFEST_MEDIA_TYPE)),
+        );
         let scope = Self::push_scope(reference);
         let resp = self
             .request(
@@ -787,7 +801,7 @@ impl Client {
                 url,
                 auth,
                 Some(headers),
-                Some(Bytes::from(body)),
+                Some(Bytes::from(body.to_vec())),
                 Some(scope),
             )
             .await?;

@@ -10,7 +10,7 @@ pub enum StoreError {
     DbOpen(String),
     #[error("BoltDB access error: {0}")]
     Db(String),
-    #[error("Containerd images bucket not found (namespace: {0})")] 
+    #[error("Containerd images bucket not found (namespace: {0})")]
     ImagesBucketMissing(String),
     #[error("Image not found: {0}")]
     ImageNotFound(String),

@@ -551,13 +551,7 @@ impl Client {
             let chunk_bytes = buffer.split().freeze();
             let chunk_len = chunk_bytes.len();
             let (next_url, next_hint) = self
-                .transmit_chunk(
-                    upload_url,
-                    auth,
-                    &scope,
-                    chunk_bytes,
-                    progress.as_ref(),
-                )
+                .transmit_chunk(upload_url, auth, &scope, chunk_bytes, progress.as_ref())
                 .await?;
             upload_url = next_url;
             chunk_seq += 1;
@@ -636,16 +630,12 @@ impl Client {
             let percent = (total_sent_bytes as f64 / total as f64 * 100.0).min(100.0);
             println!(
                 "   🔹 {} chunk #{chunk_index}: {:.2} MB ({:.1}% cumulative)",
-                digest,
-                chunk_mb,
-                percent
+                digest, chunk_mb, percent
             );
         } else {
             println!(
                 "   🔹 {} chunk #{chunk_index}: {:.2} MB (cumulative {} bytes)",
-                digest,
-                chunk_mb,
-                total_sent_bytes
+                digest, chunk_mb, total_sent_bytes
             );
         }
     }
@@ -690,10 +680,7 @@ impl Client {
             let largest_mb = largest_chunk as f64 / (1024.0 * 1024.0);
             println!(
                 "   🧾 {}: {} chunk(s) uploaded, largest chunk {:.2} MB, total {} bytes",
-                digest,
-                chunk_seq,
-                largest_mb,
-                total_sent_bytes
+                digest, chunk_seq, largest_mb, total_sent_bytes
             );
         }
     }
@@ -792,7 +779,8 @@ impl Client {
         let mut headers = HeaderMap::new();
         headers.insert(
             CONTENT_TYPE,
-            HeaderValue::from_str(media_type).unwrap_or_else(|_| HeaderValue::from_static(MANIFEST_MEDIA_TYPE)),
+            HeaderValue::from_str(media_type)
+                .unwrap_or_else(|_| HeaderValue::from_static(MANIFEST_MEDIA_TYPE)),
         );
         let scope = Self::push_scope(reference);
         let resp = self

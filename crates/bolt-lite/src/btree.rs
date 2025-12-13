@@ -1,4 +1,4 @@
-use crate::{meta::*, page::*, Bolt, Error, Result};
+use crate::{Bolt, Error, Result, meta::*, page::*};
 
 pub(crate) fn find_in_tree(db: &Bolt, page_id: u64, key: &[u8]) -> Result<Option<LeafEntry>> {
     let page = db.read_page(page_id)?;
@@ -10,7 +10,11 @@ pub(crate) fn find_in_tree(db: &Bolt, page_id: u64, key: &[u8]) -> Result<Option
                 return find_in_tree(db, elems[i].pgid, key);
             }
         }
-        return find_in_tree(db, elems.last().ok_or(Error::Corrupt("empty branch"))?.pgid, key);
+        return find_in_tree(
+            db,
+            elems.last().ok_or(Error::Corrupt("empty branch"))?.pgid,
+            key,
+        );
     }
     if flags & LEAF_PAGE_FLAG != 0 {
         return find_in_page(db.page_size, page, key);

@@ -9,10 +9,12 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-pub use meta::{BRANCH_PAGE_FLAG, BUCKET_VALUE_FLAG, LEAF_PAGE_FLAG, MAGIC, META_PAGE_FLAG, META_STRUCT_OFFSET};
-use meta::{parse_meta_at, parse_page_size, BucketHeader};
-use page::{collect_leaf_entries, LeafEntry};
 use crate::btree::{collect_tree_entries, find_in_page, find_in_tree};
+pub use meta::{
+    BRANCH_PAGE_FLAG, BUCKET_VALUE_FLAG, LEAF_PAGE_FLAG, MAGIC, META_PAGE_FLAG, META_STRUCT_OFFSET,
+};
+use meta::{BucketHeader, parse_meta_at, parse_page_size};
+use page::{LeafEntry, collect_leaf_entries};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -82,7 +84,13 @@ impl Bolt {
             None
         };
         let meta = match (meta0, meta1) {
-            (Some(m0), Some(m1)) => if m1.txid >= m0.txid { m1 } else { m0 },
+            (Some(m0), Some(m1)) => {
+                if m1.txid >= m0.txid {
+                    m1
+                } else {
+                    m0
+                }
+            }
             (Some(m0), None) => m0,
             (None, Some(m1)) => m1,
             (None, None) => return Err(Error::Corrupt("no valid meta pages")),
@@ -181,7 +189,14 @@ impl<'a> Bucket<'a> {
                         } else {
                             None
                         };
-                        out.push((e.key, Bucket { db: self.db, root: hdr.root, inline }));
+                        out.push((
+                            e.key,
+                            Bucket {
+                                db: self.db,
+                                root: hdr.root,
+                                inline,
+                            },
+                        ));
                     }
                 }
             }
@@ -199,7 +214,10 @@ impl<'a> Bucket<'a> {
 
     fn collect_entries(&self) -> Result<Vec<LeafEntry>> {
         if self.root == 0 {
-            let data = self.inline.as_ref().ok_or(Error::Corrupt("inline bucket missing data"))?;
+            let data = self
+                .inline
+                .as_ref()
+                .ok_or(Error::Corrupt("inline bucket missing data"))?;
             return collect_leaf_entries(self.db.page_size, data);
         }
         collect_tree_entries(self.db, self.root)
@@ -207,7 +225,11 @@ impl<'a> Bucket<'a> {
 
     pub fn cursor(&self) -> Result<BucketCursor<'a>> {
         let entries = self.collect_entries()?;
-        Ok(BucketCursor { entries, idx: 0, _db: self.db })
+        Ok(BucketCursor {
+            entries,
+            idx: 0,
+            _db: self.db,
+        })
     }
 }
 
@@ -240,7 +262,11 @@ impl<'a> Iterator for BucketCursor<'a> {
         }
         let entry = self.entries[self.idx].clone();
         self.idx += 1;
-        Some(CursorEntry { key: entry.key, value: entry.value, flags: entry.flags })
+        Some(CursorEntry {
+            key: entry.key,
+            value: entry.value,
+            flags: entry.flags,
+        })
     }
 }
 
@@ -260,7 +286,10 @@ mod tests {
         let mut db = Bolt {
             data: vec![0u8; 8192],
             page_size: 4096,
-            root: BucketHeader { root: 0, _sequence: 0 },
+            root: BucketHeader {
+                root: 0,
+                _sequence: 0,
+            },
         };
         let stats = db.stats();
         assert_eq!(stats.page_size, 4096);

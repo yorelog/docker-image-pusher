@@ -26,7 +26,10 @@ fn discovers_images_from_rootless_v1_layout() -> Result<()> {
     let img = &images[0];
     assert_eq!(img.name, "busybox:latest");
     assert_eq!(img.target.digest, "sha256:deadbeef");
-    assert_eq!(img.target.media_type, "application/vnd.oci.image.manifest.v1+json");
+    assert_eq!(
+        img.target.media_type,
+        "application/vnd.oci.image.manifest.v1+json"
+    );
     assert_eq!(img.target.size, 4242);
 
     Ok(())
@@ -84,13 +87,19 @@ fn write_meta_page(page: &mut [u8], root_page: u64, txid: u64) {
     page[12..16].copy_from_slice(&(0u32).to_le_bytes());
 
     page[META_STRUCT_OFFSET..META_STRUCT_OFFSET + 4].copy_from_slice(&MAGIC.to_le_bytes());
-    page[META_STRUCT_OFFSET + 8..META_STRUCT_OFFSET + 12].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
-    page[META_STRUCT_OFFSET + 16..META_STRUCT_OFFSET + 24].copy_from_slice(&root_page.to_le_bytes());
+    page[META_STRUCT_OFFSET + 8..META_STRUCT_OFFSET + 12]
+        .copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
+    page[META_STRUCT_OFFSET + 16..META_STRUCT_OFFSET + 24]
+        .copy_from_slice(&root_page.to_le_bytes());
     page[META_STRUCT_OFFSET + 24..META_STRUCT_OFFSET + 32].copy_from_slice(&0u64.to_le_bytes());
     page[META_STRUCT_OFFSET + 48..META_STRUCT_OFFSET + 56].copy_from_slice(&txid.to_le_bytes());
 }
 
-fn write_leaf_page(page: &mut [u8], page_id: u64, entries: &[(Vec<u8>, Vec<u8>, u32)]) -> Result<()> {
+fn write_leaf_page(
+    page: &mut [u8],
+    page_id: u64,
+    entries: &[(Vec<u8>, Vec<u8>, u32)],
+) -> Result<()> {
     let max_headers = 16 + entries.len() * 16;
     if max_headers > PAGE_SIZE {
         anyhow::bail!("too many entries for page");

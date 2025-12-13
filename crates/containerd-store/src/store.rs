@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use bolt_lite::{Bolt, Bucket, Tx};
 
-use crate::types::{Descriptor, ImageEntry, Result, ResolvedImage, StoreError};
+use crate::types::{Descriptor, ImageEntry, ResolvedImage, Result, StoreError};
 
 #[cfg(feature = "bucket-logging")]
 static BUCKET_MATCH_LOGGER: OnceLock<Box<dyn Fn(BucketMatch) + Send + Sync>> = OnceLock::new();
@@ -57,12 +57,16 @@ impl ContainerdStore {
             )));
         }
         Bolt::open_ro(&db_path).map_err(|e| {
-            StoreError::DbOpen(format!("failed to open metadata DB at {}: {}", db_path.display(), e))
+            StoreError::DbOpen(format!(
+                "failed to open metadata DB at {}: {}",
+                db_path.display(),
+                e
+            ))
         })?;
         Ok(Self {
             root,
             namespace: namespace.to_string(),
-            db_path
+            db_path,
         })
     }
 
@@ -84,8 +88,7 @@ impl ContainerdStore {
         let namespace = self.namespace.clone();
         let mut images = Vec::new();
 
-        let db = Bolt::open_ro(&self.db_path)
-            .map_err(|e| StoreError::Db(format!("{}", e)))?;
+        let db = Bolt::open_ro(&self.db_path).map_err(|e| StoreError::Db(format!("{}", e)))?;
         let tx = db.begin().map_err(|e| StoreError::Db(format!("{}", e)))?;
 
         let images_bucket = find_images_bucket(&tx, &namespace)
@@ -107,8 +110,7 @@ impl ContainerdStore {
         let content_root = self.content_root();
         let namespace = self.namespace.clone();
 
-        let db = Bolt::open_ro(&self.db_path)
-            .map_err(|e| StoreError::Db(format!("{}", e)))?;
+        let db = Bolt::open_ro(&self.db_path).map_err(|e| StoreError::Db(format!("{}", e)))?;
         let tx = db.begin().map_err(|e| StoreError::Db(format!("{}", e)))?;
 
         let images_bucket = find_images_bucket(&tx, &namespace)
@@ -123,7 +125,10 @@ impl ContainerdStore {
         let manifest_digest = &entry.target.digest;
         let digest_ref = crate::types::DigestRef::parse(manifest_digest)?;
         let manifest_path = digest_ref.path_under(&content_root);
-        Ok(ResolvedImage { entry, manifest_path })
+        Ok(ResolvedImage {
+            entry,
+            manifest_path,
+        })
     }
 }
 
@@ -185,9 +190,7 @@ fn read_descriptor_bucket(bucket: &Bucket<'_>) -> Result<Option<Descriptor>> {
 }
 
 fn read_str_entry(bucket: &Bucket<'_>, key: &[u8]) -> Option<String> {
-    bucket
-        .get(key)
-        .and_then(|v| String::from_utf8(v).ok())
+    bucket.get(key).and_then(|v| String::from_utf8(v).ok())
 }
 
 fn parse_size(raw: Option<Vec<u8>>) -> i64 {
@@ -217,13 +220,16 @@ fn parse_size(raw: Option<Vec<u8>>) -> i64 {
 
 fn warn_size_default() {
     SIZE_WARN_ONCE.get_or_init(|| {
-        eprintln!(
-            "containerd-store: missing or invalid descriptor size; defaulting to 0"
-        );
+        eprintln!("containerd-store: missing or invalid descriptor size; defaulting to 0");
     });
 }
 
-fn find_bucket_for<'a>(tx: &'a Tx<'a>, namespace: &str, leaf: &[u8], kind: BucketKind) -> Option<Bucket<'a>> {
+fn find_bucket_for<'a>(
+    tx: &'a Tx<'a>,
+    namespace: &str,
+    leaf: &[u8],
+    kind: BucketKind,
+) -> Option<Bucket<'a>> {
     let ns = namespace.as_bytes();
     for path in candidate_bucket_paths(ns, leaf) {
         let bucket = if path.len() == 1 {
@@ -242,7 +248,12 @@ fn find_bucket_for<'a>(tx: &'a Tx<'a>, namespace: &str, leaf: &[u8], kind: Bucke
 fn candidate_bucket_paths<'a>(namespace: &'a [u8], leaf: &'a [u8]) -> Vec<Vec<&'a [u8]>> {
     vec![
         vec![b"v1".as_ref(), namespace, leaf],
-        vec![b"metadata".as_ref(), b"namespaces".as_ref(), namespace, leaf],
+        vec![
+            b"metadata".as_ref(),
+            b"namespaces".as_ref(),
+            namespace,
+            leaf,
+        ],
         vec![b"metadata".as_ref(), leaf],
         vec![b"v1".as_ref(), leaf],
         vec![leaf],
@@ -275,7 +286,10 @@ fn log_bucket_match(kind: BucketKind, path: &[&[u8]]) {
             .iter()
             .map(|segment| String::from_utf8_lossy(segment).to_string())
             .collect();
-        logger(BucketMatch { kind, path: rendered });
+        logger(BucketMatch {
+            kind,
+            path: rendered,
+        });
     }
 }
 

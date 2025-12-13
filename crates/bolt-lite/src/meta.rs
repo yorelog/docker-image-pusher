@@ -21,11 +21,19 @@ pub(crate) struct Meta {
 
 pub(crate) fn parse_page_size(data: &[u8]) -> Result<u32> {
     let meta_slice = &data[..4096];
-    let magic = u32::from_le_bytes(meta_slice[META_STRUCT_OFFSET..META_STRUCT_OFFSET + 4].try_into().unwrap());
+    let magic = u32::from_le_bytes(
+        meta_slice[META_STRUCT_OFFSET..META_STRUCT_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
     if magic != MAGIC {
         return Err(Error::InvalidMagic);
     }
-    let page_size = u32::from_le_bytes(meta_slice[META_STRUCT_OFFSET + 8..META_STRUCT_OFFSET + 12].try_into().unwrap());
+    let page_size = u32::from_le_bytes(
+        meta_slice[META_STRUCT_OFFSET + 8..META_STRUCT_OFFSET + 12]
+            .try_into()
+            .unwrap(),
+    );
     if page_size < 1024 || page_size > 65536 {
         return Err(Error::InvalidPageSize(page_size));
     }
@@ -42,20 +50,40 @@ pub(crate) fn parse_meta_at(data: &[u8], page_size: usize, offset: usize) -> Res
     if flags & META_PAGE_FLAG == 0 {
         return Err(Error::Corrupt("page 0 not meta"));
     }
-    let magic = u32::from_le_bytes(page[META_STRUCT_OFFSET..META_STRUCT_OFFSET + 4].try_into().unwrap());
+    let magic = u32::from_le_bytes(
+        page[META_STRUCT_OFFSET..META_STRUCT_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
     if magic != MAGIC {
         return Err(Error::InvalidMagic);
     }
-    let page_size_meta = u32::from_le_bytes(page[META_STRUCT_OFFSET + 8..META_STRUCT_OFFSET + 12].try_into().unwrap());
+    let page_size_meta = u32::from_le_bytes(
+        page[META_STRUCT_OFFSET + 8..META_STRUCT_OFFSET + 12]
+            .try_into()
+            .unwrap(),
+    );
     if page_size_meta as usize != page_size {
         return Err(Error::InvalidPageSize(page_size_meta));
     }
 
     let root = BucketHeader {
-        root: u64::from_le_bytes(page[META_STRUCT_OFFSET + 16..META_STRUCT_OFFSET + 24].try_into().unwrap()),
-        _sequence: u64::from_le_bytes(page[META_STRUCT_OFFSET + 24..META_STRUCT_OFFSET + 32].try_into().unwrap()),
+        root: u64::from_le_bytes(
+            page[META_STRUCT_OFFSET + 16..META_STRUCT_OFFSET + 24]
+                .try_into()
+                .unwrap(),
+        ),
+        _sequence: u64::from_le_bytes(
+            page[META_STRUCT_OFFSET + 24..META_STRUCT_OFFSET + 32]
+                .try_into()
+                .unwrap(),
+        ),
     };
-    let txid = u64::from_le_bytes(page[META_STRUCT_OFFSET + 48..META_STRUCT_OFFSET + 56].try_into().unwrap());
+    let txid = u64::from_le_bytes(
+        page[META_STRUCT_OFFSET + 48..META_STRUCT_OFFSET + 56]
+            .try_into()
+            .unwrap(),
+    );
 
     Ok(Meta { root, txid })
 }

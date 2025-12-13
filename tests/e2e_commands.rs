@@ -41,9 +41,12 @@ fn e2e_export_and_push() {
     let mut export_cmd = Command::cargo_bin("docker-image-pusher").expect("bin");
     export_cmd
         .arg("save")
-        .arg("--root").arg(&root)
-        .arg("--namespace").arg(&namespace)
-        .arg("--out").arg(&out_dir)
+        .arg("--root")
+        .arg(&root)
+        .arg("--namespace")
+        .arg(&namespace)
+        .arg("--out")
+        .arg(&out_dir)
         .arg(&image);
     export_cmd.assert().success();
 
@@ -51,12 +54,21 @@ fn e2e_export_and_push() {
     let mut push_cmd = Command::cargo_bin("docker-image-pusher").expect("bin");
     push_cmd
         .arg("push")
-        .arg("--root").arg(&out_dir)
-        .arg("--namespace").arg(&namespace)
-        .arg("--image").arg(&image);
-    if let Some(t) = target { push_cmd.arg("--target").arg(t); }
-    if let Some(u) = username.as_ref() { push_cmd.arg("--username").arg(u); }
-    if let Some(p) = password.as_ref() { push_cmd.arg("--password").arg(p); }
+        .arg("--root")
+        .arg(&out_dir)
+        .arg("--namespace")
+        .arg(&namespace)
+        .arg("--image")
+        .arg(&image);
+    if let Some(t) = target {
+        push_cmd.arg("--target").arg(t);
+    }
+    if let Some(u) = username.as_ref() {
+        push_cmd.arg("--username").arg(u);
+    }
+    if let Some(p) = password.as_ref() {
+        push_cmd.arg("--password").arg(p);
+    }
 
     let push_out = push_cmd.assert();
     push_out.success();
@@ -89,10 +101,15 @@ fn e2e_push_tar() {
 
     let mut push_cmd = Command::cargo_bin("docker-image-pusher").expect("bin");
     push_cmd.arg("push").arg("--tar").arg(&tar_path);
-    if let Some(t) = target { push_cmd.arg("--target").arg(t); }
-    if let Some(u) = username.as_ref() { push_cmd.arg("--username").arg(u); }
-    if let Some(p) = password.as_ref() { push_cmd.arg("--password").arg(p); }
+    if let Some(t) = target {
+        push_cmd.arg("--target").arg(t);
+    }
+    if let Some(u) = username.as_ref() {
+        push_cmd.arg("--username").arg(u);
+    }
+    if let Some(p) = password.as_ref() {
+        push_cmd.arg("--password").arg(p);
+    }
 
     push_cmd.assert().success();
 }
-

@@ -4,22 +4,34 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::types::{DigestRef, ManifestInfo, PortableImageExport, Result, StoreError};
 use crate::ContainerdStore;
+use crate::types::{DigestRef, ManifestInfo, PortableImageExport, Result, StoreError};
 
-pub fn export_image_to_dir(store: &ContainerdStore, image: &str, out: impl AsRef<Path>) -> Result<PortableImageExport> {
+pub fn export_image_to_dir(
+    store: &ContainerdStore,
+    image: &str,
+    out: impl AsRef<Path>,
+) -> Result<PortableImageExport> {
     let mut all = export_images_to_dir(store, &[image], out)?;
     Ok(all.remove(0))
 }
 
-pub fn export_images_to_dir(store: &ContainerdStore, images: &[&str], out: impl AsRef<Path>) -> Result<Vec<PortableImageExport>> {
+pub fn export_images_to_dir(
+    store: &ContainerdStore,
+    images: &[&str],
+    out: impl AsRef<Path>,
+) -> Result<Vec<PortableImageExport>> {
     let out_root = out.as_ref().to_path_buf();
-    let mirror_root = out_root.join("io.containerd.content.v1.content").join("blobs");
+    let mirror_root = out_root
+        .join("io.containerd.content.v1.content")
+        .join("blobs");
     fs::create_dir_all(&mirror_root)?;
 
     // copy meta.db so the bundle is self-contained
     let meta_src = store.meta_db_path();
-    let meta_dst = out_root.join("io.containerd.metadata.v1.bolt").join("meta.db");
+    let meta_dst = out_root
+        .join("io.containerd.metadata.v1.bolt")
+        .join("meta.db");
     if let Some(parent) = meta_dst.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -35,7 +47,13 @@ pub fn export_images_to_dir(store: &ContainerdStore, images: &[&str], out: impl 
         let resolved = store.resolve_image(image)?;
         let manifest_digest = resolved.entry.target.digest.clone();
         let mut this_copied = Vec::new();
-        copy_manifest_tree(&content_root, &mirror_root, &manifest_digest, &mut copied, &mut this_copied)?;
+        copy_manifest_tree(
+            &content_root,
+            &mirror_root,
+            &manifest_digest,
+            &mut copied,
+            &mut this_copied,
+        )?;
         results.push(PortableImageExport {
             manifest_digest,
             blobs_root: mirror_root.clone(),
@@ -65,9 +83,7 @@ fn copy_if_needed(src: &Path, dst: &Path) -> Result<()> {
 fn load_manifest(path: &Path) -> Result<ManifestInfo> {
     let bytes = fs::read(path)?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let config_digest = manifest["config"]["digest"]
-        .as_str()
-        .map(|s| s.to_string());
+    let config_digest = manifest["config"]["digest"].as_str().map(|s| s.to_string());
     let mut layers = Vec::new();
     if let Some(arr) = manifest["layers"].as_array() {
         for layer in arr {
@@ -96,7 +112,8 @@ fn parse_manifest_or_index(path: &Path) -> Result<ManifestKind> {
         let manifests = json["manifests"].as_array().cloned().unwrap_or_default();
         let pick = select_platform_manifest(&manifests)
             .ok_or_else(|| StoreError::ImageNotFound("no manifests in index".into()))?;
-        let digest = pick.get("digest")
+        let digest = pick
+            .get("digest")
             .and_then(|v| v.as_str())
             .ok_or_else(|| StoreError::ImageNotFound("manifest digest missing in index".into()))?;
         return Ok(ManifestKind::Index(digest.to_string()));
@@ -134,7 +151,8 @@ fn copy_manifest_tree(
     let manifest_src = manifest_ref.path_under(content_root);
     if !manifest_src.exists() {
         return Err(StoreError::ImageNotFound(format!(
-            "manifest blob missing at {}", manifest_src.display()
+            "manifest blob missing at {}",
+            manifest_src.display()
         )));
     }
     let manifest_dst = manifest_ref.path_under(mirror_root);

@@ -1,11 +1,11 @@
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
+mod containerd_import;
 mod progress_display;
 mod push;
 mod state;
 mod tar_import;
-mod containerd_import;
 
 use oci_core::client::{Client, ClientConfig};
 
@@ -78,10 +78,10 @@ enum Commands {
         #[arg(value_name = "IMAGE", num_args = 1..)]
         images: Vec<String>,
         /// Output directory (or tar path if you tar it yourself afterwards)
-        #[arg(long, value_name = "OUT")] 
+        #[arg(long, value_name = "OUT")]
         out: String,
         /// Optional manifest digest to bypass metadata lookup (e.g., sha256:abcd...)
-        #[arg(long, value_name = "DIGEST")] 
+        #[arg(long, value_name = "DIGEST")]
         digest: Option<String>,
     },
     /// List images recorded in containerd metadata.db
@@ -158,17 +158,13 @@ async fn main() -> Result<(), PusherError> {
         } => {
             if let Some(tar_path) = tar {
                 push::run_push(
-                    &client,
-                    &tar_path,
-                    target,
-                    username,
-                    password,
-                    registry,
-                    blob_chunk,
+                    &client, &tar_path, target, username, password, registry, blob_chunk,
                 )
                 .await?;
             } else {
-                let image = image.ok_or_else(|| PusherError::push_error("--image is required when pushing from containerd"))?;
+                let image = image.ok_or_else(|| {
+                    PusherError::push_error("--image is required when pushing from containerd")
+                })?;
                 containerd_import::run_push_containerd(
                     &client,
                     root.as_deref(),
@@ -183,14 +179,21 @@ async fn main() -> Result<(), PusherError> {
                 .await?;
             }
         }
-        Commands::Save { root, namespace, images, out, digest } => {
+        Commands::Save {
+            root,
+            namespace,
+            images,
+            out,
+            digest,
+        } => {
             containerd_import::export_images(
                 root.as_deref(),
                 &namespace,
                 &images,
                 &out,
                 digest.as_deref(),
-            ).await?;
+            )
+            .await?;
         }
         Commands::ListContainerd { root, namespace } => {
             containerd_import::list_images(root.as_deref(), &namespace).await?;

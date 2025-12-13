@@ -48,10 +48,10 @@ sha2 = "0.10"
 oci-core = { version = "0.1.0", path = "crates/oci-core" }
 
 # Containerd metadata/content reader
-containerd-store = { path = "crates/containerd-store" }
+containerd-store = { version = "0.1.0", path = "crates/containerd-store" }
 
 # Minimal Bolt reader for containerd validation
-bolt-lite = { path = "crates/bolt-lite" }
+bolt-lite = { version = "0.1.0", path = "crates/bolt-lite" }
 
 # CLI helpers
 which = "8.0"

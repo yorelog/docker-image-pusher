@@ -162,28 +162,37 @@ fn parse_image_bucket(bucket: &Bucket<'_>, name: &str) -> Result<Option<ImageEnt
 }
 
 fn read_descriptor_bucket(bucket: &Bucket<'_>) -> Result<Option<Descriptor>> {
-    let digest = read_str_entry(bucket, b"digest");
-    let media_type = read_str_entry(bucket, b"mediatype");
-    let size = parse_size(bucket.get(b"size"));
+    let mut digest = read_str_entry(bucket, b"digest");
+    let mut media_type = read_str_entry(bucket, b"mediatype");
+    let mut size = parse_size(bucket.get(b"size"));
+
+    // If any field is missing, try parsing a JSON descriptor stored directly under "target".
+    if digest.is_none() || media_type.is_none() || size.is_none() {
+        if let Some(raw) = bucket.get(b"target") {
+            if let Ok(json_desc) = serde_json::from_slice::<self::json_models::Target>(&raw) {
+                if digest.is_none() {
+                    digest = Some(json_desc.digest);
+                }
+                if media_type.is_none() {
+                    media_type = Some(json_desc.media_type);
+                }
+                if size.is_none() {
+                    size = json_desc.size;
+                }
+            }
+        }
+    }
 
     if let (Some(digest), Some(media_type)) = (digest, media_type) {
+        let size = size.unwrap_or_else(|| {
+            warn_size_default();
+            0
+        });
         return Ok(Some(Descriptor {
             media_type,
             digest,
             size,
         }));
-    }
-
-    // Try entries of the bucket (not nested) as JSON
-    if let Some(raw) = bucket.get(b"target") {
-        if let Ok(json_desc) = serde_json::from_slice::<self::json_models::Target>(&raw) {
-            let size = json_desc.size.unwrap_or(0);
-            return Ok(Some(Descriptor {
-                media_type: json_desc.media_type,
-                digest: json_desc.digest,
-                size,
-            }));
-        }
     }
 
     Ok(None)
@@ -193,28 +202,17 @@ fn read_str_entry(bucket: &Bucket<'_>, key: &[u8]) -> Option<String> {
     bucket.get(key).and_then(|v| String::from_utf8(v).ok())
 }
 
-fn parse_size(raw: Option<Vec<u8>>) -> i64 {
+fn parse_size(raw: Option<Vec<u8>>) -> Option<i64> {
     match raw {
         Some(bytes) if bytes.len() == 8 => {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&bytes);
-            i64::from_le_bytes(buf)
+            Some(i64::from_le_bytes(buf))
         }
-        Some(bytes) => {
-            if let Some(parsed) = std::str::from_utf8(&bytes)
-                .ok()
-                .and_then(|s| s.parse::<i64>().ok())
-            {
-                parsed
-            } else {
-                warn_size_default();
-                0
-            }
-        }
-        None => {
-            warn_size_default();
-            0
-        }
+        Some(bytes) => std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok()),
+        None => None,
     }
 }
 

@@ -94,7 +94,6 @@ impl DockerLikeProgressReporter {
 
         let order_guard = self.order.lock().expect("progress order poisoned");
         let mut lines = Vec::with_capacity(order_guard.len() + 1);
-        lines.push(render_overall_line(&stats_guard, self.started_at));
         lines.extend(
             order_guard
                 .iter()
@@ -334,55 +333,3 @@ fn digest_label(digest: &str) -> String {
     }
 }
 
-fn render_overall_line(stats: &HashMap<String, LayerStats>, started_at: Instant) -> String {
-    let total_layers = stats.len();
-    let completed_layers = stats.values().filter(|entry| entry.completed).count();
-
-    let total_bytes: u64 = stats.values().map(|entry| entry.total_bytes).sum();
-    let sent_bytes: u64 = stats.values().map(|entry| entry.sent_bytes).sum();
-
-    let percent = if total_bytes > 0 {
-        (sent_bytes as f64 / total_bytes as f64 * 100.0).min(100.0)
-    } else {
-        0.0
-    };
-
-    let elapsed = started_at.elapsed().as_secs_f64();
-    let speed_mbps = if elapsed > 0.0 {
-        (sent_bytes as f64 / MB) / elapsed
-    } else {
-        0.0
-    };
-    let eta_seconds = if speed_mbps > 0.0 && total_bytes > sent_bytes {
-        let remaining_mb = (total_bytes - sent_bytes) as f64 / MB;
-        Some(remaining_mb / speed_mbps)
-    } else {
-        None
-    };
-
-    let (sent_value, sent_unit) = format_size(sent_bytes);
-    let (total_value, total_unit) = format_size(total_bytes);
-    let bar = render_progress_bar(percent / 100.0, 28);
-    let speed_display = if speed_mbps > 0.0 {
-        format!("{:.1} MB/s", speed_mbps)
-    } else {
-        "-- MB/s".to_string()
-    };
-
-    let eta_display = format_eta(eta_seconds);
-
-    format!(
-        "   {label:<12} [{bar}] {percent:>6.2}% {sent_value:>6.2} {sent_unit} / {total_value:>6.2} {total_unit} | {speed_display:<10} | ETA {eta_display} | layers {completed}/{total} done",
-        label = "OVERALL",
-        bar = bar,
-        percent = percent,
-        sent_value = sent_value,
-        sent_unit = sent_unit,
-        total_value = total_value,
-        total_unit = total_unit,
-        speed_display = speed_display,
-        eta_display = eta_display,
-        completed = completed_layers,
-        total = total_layers,
-    )
-}

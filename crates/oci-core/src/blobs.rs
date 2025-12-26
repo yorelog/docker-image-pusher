@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::{self, Duration};
 
-const MAX_STREAM_RETRIES: usize = 2;
+const MAX_STREAM_RETRIES: usize = 4;
 const MAX_AUTO_CHUNK_BYTES: usize = 256 * 1024 * 1024;
 
 use crate::auth::RegistryAuth;
@@ -246,7 +246,11 @@ async fn upload_small_layer(
     auth: &RegistryAuth,
     layer: &LocalLayer,
 ) -> Result<(), OciError> {
-    println!("   📤 Uploading layer directly...");
+    println!(
+        "   📤 Uploading layer directly: {} ({:.1} MB)",
+        layer.digest,
+        layer.size_mb()
+    );
 
     let read_start = Instant::now();
     let layer_data = tokio::fs::read(&layer.path).await?;
@@ -286,8 +290,10 @@ async fn upload_large_layer(
     let layer_size_mb = layer.size_mb();
     let chunk_size_mb = options.chunk_size_bytes as f64 / (1024.0 * 1024.0);
     println!(
-        "   🔄 Chunk-streaming large layer ({:.1} MB) in {:.0} MB chunks (auto-adjusting)...",
-        layer_size_mb, chunk_size_mb
+        "   🔄 Chunk-streaming layer {} ({:.1} MB) in {:.0} MB chunks (auto-adjusting)...",
+        layer.digest,
+        layer_size_mb,
+        chunk_size_mb
     );
     let estimated_chunks = ((layer.size as f64) / options.chunk_size_bytes as f64)
         .ceil()
@@ -344,7 +350,8 @@ async fn upload_large_layer(
         let mut file = File::open(&layer.path).await?;
         if attempt > 0 {
             println!(
-                "   🔁 Upload session reset by registry; restarting stream (attempt {}/{})",
+                "   🔁 [{}] Upload session reset by registry; restarting stream (attempt {}/{})",
+                layer.digest,
                 attempt + 1,
                 MAX_STREAM_RETRIES + 1
             );
@@ -368,20 +375,39 @@ async fn upload_large_layer(
                     if let Some(handle) = &progress_handle {
                         handle.abort();
                     }
+                    if let Ok(true) = client.blob_exists(reference, &layer.digest, auth).await {
+                        println!("   ✅ [{}] Registry already has layer; resuming", layer.digest);
+                        return Ok(());
+                    }
                     return Err(OciError::UploadReset(format!(
                         "{} (after {} retries)",
                         reason,
                         MAX_STREAM_RETRIES + 1
                     )));
                 }
+                let attempt_no = attempt + 1;
                 attempt += 1;
                 let trimmed = reason.chars().take(160).collect::<String>();
-                println!("   ⚠️  Registry invalidated upload session: {}", trimmed);
+                println!(
+                    "   ⚠️  [{}] Registry invalidated upload session: {} (retry {}/{})",
+                    layer.digest,
+                    trimmed,
+                    attempt_no,
+                    MAX_STREAM_RETRIES + 1
+                );
+                let backoff_ms = (500u64.saturating_mul(1u64 << (attempt_no.saturating_sub(1) as u32))).min(8000);
+                println!(
+                    "   ⏳ [{}] Backing off for {} ms before retry",
+                    layer.digest,
+                    backoff_ms
+                );
+                time::sleep(Duration::from_millis(backoff_ms)).await;
                 let new_size = bump_chunk_size(adaptive_chunk_bytes);
                 if new_size != adaptive_chunk_bytes {
                     adaptive_chunk_bytes = new_size;
                     println!(
-                        "   📏 Increasing chunk size to {:.0} MB to reduce PATCH count",
+                        "   📏 [{}] Increasing chunk size to {:.0} MB to reduce PATCH count",
+                        layer.digest,
                         adaptive_chunk_bytes as f64 / (1024.0 * 1024.0)
                     );
                 }

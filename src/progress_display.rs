@@ -103,32 +103,12 @@ impl DockerLikeProgressReporter {
         lines
     }
 
-    fn snapshot_line(&self, digest: &str) -> Option<String> {
-        self.stats
-            .lock()
-            .expect("progress stats poisoned")
-            .get(digest)
-            .map(LayerStats::render_line)
-    }
-
-    fn snapshot_overall_line(&self) -> Option<String> {
-        let stats_guard = self.stats.lock().expect("progress stats poisoned");
-        if stats_guard.is_empty() {
-            None
-        } else {
-            Some(render_overall_line(&stats_guard, self.started_at))
-        }
-    }
-
-    fn push_update(&self, digest: &str) {
+    fn push_update(&self, _digest: &str) {
         if self.interactive {
             let lines = self.snapshot_lines();
             self.render_lines(&lines);
         } else {
-            if let Some(overall) = self.snapshot_overall_line() {
-                println!("{}", overall);
-            }
-            if let Some(line) = self.snapshot_line(digest) {
+            for line in self.snapshot_lines() {
                 println!("{}", line);
             }
         }

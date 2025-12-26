@@ -371,13 +371,18 @@ async fn upload_large_layer(
         {
             Ok(_) => break,
             Err(OciError::UploadReset(reason)) => {
-                if attempt >= MAX_STREAM_RETRIES {
+                // Check if blob already exists on registry after each reset
+                if let Ok(true) = client.blob_exists(reference, &layer.digest, auth).await {
+                    println!("   ✅ [{}] Registry already has layer after reset; resuming", layer.digest);
                     if let Some(handle) = &progress_handle {
                         handle.abort();
                     }
-                    if let Ok(true) = client.blob_exists(reference, &layer.digest, auth).await {
-                        println!("   ✅ [{}] Registry already has layer; resuming", layer.digest);
-                        return Ok(());
+                    return Ok(());
+                }
+                
+                if attempt >= MAX_STREAM_RETRIES {
+                    if let Some(handle) = &progress_handle {
+                        handle.abort();
                     }
                     return Err(OciError::UploadReset(format!(
                         "{} (after {} retries)",

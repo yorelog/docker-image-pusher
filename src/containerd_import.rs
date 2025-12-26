@@ -47,10 +47,28 @@ pub async fn run_push_containerd(
         .map_err(|e| PusherError::push_error(format!("Failed to load manifest: {e}")))?;
     let manifest = manifest_payload.manifest.clone();
 
-    // Gather layers
+    // Gather layers and check remote existence
     let mut layers = Vec::new();
     for layer in &manifest.layers {
         let digest = layer.digest.clone();
+        
+        // Check if blob already exists in registry
+        match client.blob_exists(&target_ref, &digest, auth.as_ref()).await {
+            Ok(true) => {
+                println!("   ⏭️  Layer {} already in registry, skipping", digest);
+                continue;
+            }
+            Ok(false) => {
+                // Blob doesn't exist, proceed with upload
+            }
+            Err(err) => {
+                println!(
+                    "   ⚠️  Unable to check layer {} in registry (will attempt upload): {}",
+                    digest, err
+                );
+            }
+        }
+        
         let path = digest_to_path(&store, &digest)?;
         let meta = fs::metadata(&path).map_err(|e| {
             PusherError::push_error(format!(
@@ -88,7 +106,7 @@ pub async fn run_push_containerd(
         progress_reporter: Some(crate::progress_display::docker_like_progress_reporter()),
     };
 
-    println!("📤 Uploading layers for {}", target_ref);
+    println!("📤 Uploading layers for {} ({} to upload)", target_ref, layers.len());
     let (tx, rx) = mpsc::channel::<LocalLayer>(upload_options.concurrency * 2);
     for layer in layers {
         tx.send(layer)
@@ -103,20 +121,29 @@ pub async fn run_push_containerd(
         .await
         .map_err(|e| PusherError::push_error(format!("Layer upload failed: {e}")))?;
     if upload_summary.skipped > 0 {
-        println!("💡 Skipped {} existing layer(s)", upload_summary.skipped);
+        println!("💡 Skipped {} existing layer(s) during upload", upload_summary.skipped);
     }
 
     // Push config blob
     let config_digest = &manifest.config.digest;
-    let config_path = digest_to_path(&store, config_digest)?;
-    let config_bytes = fs::read(&config_path).map_err(|e| {
-        PusherError::push_error(format!("Failed to read config {}: {e}", config_digest))
-    })?;
-    println!("⚙️  Uploading config {}", config_digest);
-    client
-        .push_blob(&target_ref, auth.as_ref(), &config_bytes, config_digest)
-        .await
-        .map_err(|e| PusherError::push_error(format!("Failed to upload config: {e}")))?;
+    
+    // Check if config already exists in registry
+    match client.blob_exists(&target_ref, config_digest, auth.as_ref()).await {
+        Ok(true) => {
+            println!("   ⏭️  Config {} already in registry, skipping", config_digest);
+        }
+        Ok(false) | Err(_) => {
+            let config_path = digest_to_path(&store, config_digest)?;
+            let config_bytes = fs::read(&config_path).map_err(|e| {
+                PusherError::push_error(format!("Failed to read config {}: {e}", config_digest))
+            })?;
+            println!("⚙️  Uploading config {}", config_digest);
+            client
+                .push_blob(&target_ref, auth.as_ref(), &config_bytes, config_digest)
+                .await
+                .map_err(|e| PusherError::push_error(format!("Failed to upload config: {e}")))?;
+        }
+    }
 
     println!("📋 Pushing manifest to registry: {}", target_image);
     client

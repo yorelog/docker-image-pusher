@@ -31,8 +31,7 @@ pub struct DockerLikeProgressReporter {
     stats: Mutex<HashMap<String, LayerStats>>,
     order: Mutex<Vec<String>>,
     rendered_lines: Mutex<usize>,
-    interactive: bool,
-    started_at: Instant,
+    interactive: bool
 }
 
 impl DockerLikeProgressReporter {
@@ -41,8 +40,7 @@ impl DockerLikeProgressReporter {
             stats: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             rendered_lines: Mutex::new(0),
-            interactive: io::stdout().is_terminal(),
-            started_at: Instant::now(),
+            interactive: io::stdout().is_terminal()
         }
     }
 

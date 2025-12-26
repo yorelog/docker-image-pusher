@@ -1,7 +1,5 @@
 use std::env;
 use std::path::PathBuf;
-use std::process::Command as StdCommand;
-
 use assert_cmd::Command;
 
 // End-to-end tests that exercise both containerd bundle and docker-save tar flows.

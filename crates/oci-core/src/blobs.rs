@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
@@ -104,9 +104,12 @@ pub struct UploadSummary {
     pub skipped: usize,
 }
 
+#[allow(dead_code)]
 struct LayerUploadOutcome {
     digest: String,
     skipped: bool,
+    position: usize,
+    total: usize,
 }
 
 /// Coordinates per-layer uploads with bounded concurrency.
@@ -139,11 +142,23 @@ impl LayerUploadPool {
         let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
         let mut summary = UploadSummary::default();
         let mut closed = false;
+        let mut total_layers = 0;
+        let position_counter = Arc::new(AtomicUsize::new(0));
+        let total_counter = Arc::new(AtomicUsize::new(0));
 
         loop {
             while in_flight.len() < self.options.concurrency && !closed {
                 match layers.recv().await {
-                    Some(layer) => in_flight.push(self.upload_layer_task(layer)),
+                    Some(layer) => {
+                        total_layers += 1;
+                        total_counter.store(total_layers, Ordering::Relaxed);
+                        in_flight.push(self.upload_layer_task_with_progress(
+                            layer,
+                            total_layers,
+                            Arc::clone(&position_counter),
+                            Arc::clone(&total_counter),
+                        ));
+                    }
                     None => closed = true,
                 }
             }
@@ -168,15 +183,22 @@ impl LayerUploadPool {
         Ok(summary)
     }
 
-    fn upload_layer_task(
+    fn upload_layer_task_with_progress(
         &self,
         layer: LocalLayer,
+        _total: usize,
+        position: Arc<AtomicUsize>,
+        total_counter: Arc<AtomicUsize>,
     ) -> BoxFuture<'static, Result<LayerUploadOutcome, OciError>> {
         let client = self.client.clone();
         let reference = self.reference.clone();
         let auth = Arc::clone(&self.auth);
         let options = self.options.clone();
-        Box::pin(async move { upload_single_layer(client, reference, auth, options, layer).await })
+        Box::pin(async move {
+            let pos = position.fetch_add(1, Ordering::Relaxed) + 1;
+            let total_val = total_counter.load(Ordering::Relaxed);
+            upload_single_layer(client, reference, auth, options, layer, pos, total_val).await
+        })
     }
 }
 
@@ -186,11 +208,18 @@ async fn upload_single_layer(
     auth: Arc<RegistryAuth>,
     options: LayerUploadOptions,
     layer: LocalLayer,
+    position: usize,
+    total: usize,
 ) -> Result<LayerUploadOutcome, OciError> {
     let layer_size_mb = layer.size_mb();
+    let progress_str = if total > 0 {
+        format!("[{}/{}] ", position, total)
+    } else {
+        String::new()
+    };
     println!(
-        "📦 Uploading layer {} ({:.1} MB)",
-        layer.digest, layer_size_mb
+        "📦 {}Uploading layer {} ({:.1} MB)",
+        progress_str, layer.digest, layer_size_mb
     );
 
     if blob_exists(&client, &reference, auth.as_ref(), &layer).await? {
@@ -201,6 +230,8 @@ async fn upload_single_layer(
         return Ok(LayerUploadOutcome {
             digest: layer.digest,
             skipped: true,
+            position,
+            total,
         });
     }
 
@@ -219,6 +250,8 @@ async fn upload_single_layer(
     Ok(LayerUploadOutcome {
         digest: layer.digest,
         skipped: false,
+        position,
+        total,
     })
 }
 

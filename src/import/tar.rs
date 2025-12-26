@@ -12,7 +12,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     GZIP_MAGIC_BYTES, PROGRESS_LAYER_THRESHOLD_BYTES, PROGRESS_UPDATE_INTERVAL_SECS, PusherError,
-    STREAM_BUFFER_SIZE, state,
+    STREAM_BUFFER_SIZE,
+    common::state,
 };
 use oci_core::blobs::LocalLayer;
 

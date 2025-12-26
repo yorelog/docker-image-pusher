@@ -1,101 +1,31 @@
 # Docker Image Pusher
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 [![Build Status](https://github.com/yorelog/docker-image-pusher/workflows/Build/badge.svg)](https://github.com/yorelog/docker-image-pusher/actions)
 [![Crates.io](https://img.shields.io/crates/v/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 [![Downloads](https://img.shields.io/crates/d/docker-image-pusher.svg)](https://crates.io/crates/docker-image-pusher)
 [![License](https://img.shields.io/github/license/yorelog/docker-image-pusher)](https://github.com/yorelog/docker-image-pusher)
 
-A memory-optimized Docker image transfer tool designed to handle large Docker images without excessive memory usage. This tool addresses the common problem of memory exhaustion when pulling or pushing multi-gigabyte Docker images.
+A tiny, memory‑friendly Docker/OCI image pusher for large images and constrained hosts.
 
-## 🎯 Problem Statement
+Highlights:
+- Streaming layer uploads with bounded memory
+- Chunked uploads for large layers (auto‑adapts to registry hints)
+- Clear progress reporting; resumable upload sessions
+- Works with tar archives or directly from containerd
+- Simple override: `docker.io/nginx:v1` + `--target gitea.corp.com/proj` -> `gitea.corp.com/proj/nginx:v1`
 
-Traditional Docker image tools often load entire layers into memory, which can cause:
-- **Memory exhaustion** with large images (>1GB)
-- **System instability** when processing multiple large layers
-- **Failed transfers** due to insufficient RAM
-- **Poor performance** on resource-constrained systems
+## 📦 Install
 
-## 🚀 Solution
+- Releases: download binaries from [GitHub Releases](https://github.com/yorelog/docker-image-pusher/releases)
+- Crates.io: `cargo install docker-image-pusher`
+- From source:
+    ```bash
+    git clone https://github.com/yorelog/docker-image-pusher
+    cd docker-image-pusher && cargo build --release
+    ```
 
-This tool implements **streaming-based layer processing** using the OCI client library:
-
-- ✅ **Streaming Downloads**: Layers are streamed directly to disk without loading into memory
-- ✅ **Sequential Processing**: Processes one layer at a time to minimize memory footprint  
-- ✅ **Chunked Uploads**: Layers ≥500MB stream in ~5MB chunks (auto-expands when registries demand larger slices)
-- ✅ **Local Caching**: Efficient caching system for faster subsequent operations
-- ✅ **Progress Monitoring**: Real-time feedback on transfer progress and layer sizes
-
-## 🆕 What's New in 0.5.4
-
-- **Pipeline lives in `oci-core`** – The concurrent extraction/upload queue, blob-existence checks, rate limiting, and telemetry now ship inside the reusable `oci-core::blobs` module. Other projects can embed the exact same uploader without copy/paste.
-- **Prefetch-aware chunk uploads** – Large layers read an initial chunk into memory before network I/O begins, giving registries a steady stream immediately and honoring any server-provided chunk size hints mid-flight.
-- **Tar importer emits shared `LocalLayer` structs** – `tar_import.rs` now returns the exact structs consumed by `LayerUploadPool`, eliminating adapter code and reducing memory copies during extraction.
-- **Cleaner push workflow** – `src/push.rs` delegates scheduling to `LayerUploadPool`, so the CLI only worries about plan setup, manifest publishing, and user prompts. The parallelism cap and chunk sizing still respect the same CLI flags as before.
-- **Docs caught up** – This README now documents the pipeline-focused architecture, the new reusable uploader, and the 0.5.4 feature set.
-
-## OCI Core Library
-
-The OCI functionality now lives inside `crates/oci-core`, an MIT-licensed library crate that
-can be embedded in other tools. It exposes:
-
-- `reference` – a no-dependency reference parser with rich `OciError` signals
-- `auth` – helpers for anonymous/basic auth negotiation
-- `client` – an async `reqwest` uploader/downloader that understands chunked blobs,
-  real-time telemetry, and registry-provided chunk hints
-
-`docker-image-pusher` consumes `oci-core` through a normal Cargo path dependency, mirroring how
-Rust itself treats the `core` crate. This keeps the CLI boundary clean while enabling other
-projects to reuse the same stable OCI primitives without pulling in the rest of the binary.
-
-## 🛠️ Installation
-
-### Download Pre-built Binaries (Recommended)
-
-Download the latest compiled binaries from [GitHub Releases](https://github.com/yorelog/docker-image-pusher/releases):
-
-**Available Platforms:**
-- `docker-image-pusher-linux-x86_64` - Linux 64-bit
-- `docker-image-pusher-macos-x86_64` - macOS Intel
-- `docker-image-pusher-macos-aarch64` - macOS Apple Silicon (M1/M2)
-- `docker-image-pusher-windows-x86_64.exe` - Windows 64-bit
-
-**Installation Steps:**
-
-1. Visit the [Releases page](https://github.com/yorelog/docker-image-pusher/releases)
-2. Download the binary for your platform from the latest release
-3. Make it executable and add to PATH:
-
-```bash
-# Linux/macOS
-chmod +x docker-image-pusher-*
-sudo mv docker-image-pusher-* /usr/local/bin/docker-image-pusher
-
-# Windows
-# Move docker-image-pusher-windows-x86_64.exe to a directory in your PATH
-# Rename to docker-image-pusher.exe if desired
-```
-
-### Install from Crates.io
-
-Install directly using Cargo from the official Rust package registry:
-
-```bash
-cargo install docker-image-pusher
-```
-
-This will compile and install the latest published version from [crates.io](https://crates.io/crates/docker-image-pusher).
-
-### From Source
-
-For development or customization:
-
-```bash
-git clone https://github.com/yorelog/docker-image-pusher
-cd docker-image-pusher
-cargo build --release
-```
-
-The compiled binary will be available at `target/release/docker-image-pusher` (or `.exe` on Windows)
 
 ## 📖 Usage
 
@@ -107,83 +37,78 @@ The compiled binary will be available at `target/release/docker-image-pusher` (o
     ```
     Credentials are saved under `.docker-image-pusher/credentials.json` and reused automatically.
 
-2. **Save a local image to a tarball**
+2. **Save a local image to a tarball (optional)**
     ```bash
-    docker-image-pusher save nginx:latest
+    docker-image-pusher save nginx:latest --out ./
+    # produces ./nginx_latest.tar
     ```
-    - Detects Docker/nerdctl/Podman automatically (or pass `--runtime`).
-    - Prompts for image selection if you omit arguments.
-    - Produces a sanitized tar such as `./nginx_latest.tar`.
 
 3. **Push the tar archive**
     ```bash
-    docker-image-pusher push ./nginx_latest.tar
+    docker-image-pusher push --tar ./nginx_latest.tar
     ```
-    - The RepoTag embedded in the tar is combined with the most recent registry you authenticated against (or `--target/--registry` overrides).
-    - If the destination image was confirmed previously, we auto-continue after a short pause; otherwise we prompt before uploading.
+    - Use `--target` to set the exact destination. If omitted, we infer from tar metadata and (optionally) `--registry`.
+    - If the destination was confirmed previously, we auto-continue after a short pause; otherwise we prompt once.
 
 ### Command Reference
 
 | Command | When to use | Key flags |
 |---------|-------------|-----------|
-| `save [IMAGE ...]` | Export one or more local images to tar archives | `--runtime`, `--output-dir`, `--force` |
-| `push <tar>` | Upload a docker-save tar archive directly to a registry | `-t/--target`, `--registry`, `--username/--password`, `--blob-chunk` |
+| `save [IMAGE ...]` | Export local images to tar/portable folder | `--out`, `--root`, `--namespace`, `--digest` |
+| `push --tar <TAR>` | Upload a docker-save tar directly to a registry | `-t/--target`, `--registry`, `--username/--password`, `--blob-chunk` |
+| `push --image <IMAGE>` | Push directly from containerd (no tar) | `--root`, `--namespace`, `-t/--target`, `--username/--password`, `--blob-chunk` |
 | `login <registry>` | Persist credentials for future pushes | `--username`, `--password` |
 
-The `push` command now handles most of the bookkeeping automatically:
+### Destination overrides
 
-- infers a sensible destination from tar metadata, the last five targets, or stored credentials
-- prompts once when switching registries (or auto-confirms if you accepted it before)
-- imports `docker save` archives on the fly before uploading
-- reuses saved logins unless you pass explicit `--username/--password`
+- If the tar contains `docker.io/nginx:v1` and you pass `--target gitea.corp.com/project1`,
+    the final destination resolves to `gitea.corp.com/project1/nginx:v1` (repo/tag taken from tar).
+- If you pass a full target like `--target gitea.corp.com/project1/nginx:custom`, it is used as-is.
+- `--registry` only affects inference when `--target` is not provided; it forces the registry host while keeping repo/tag from tar metadata.
 
+## 🧭 Scenarios
 
-## 🏗️ Architecture
+### 1) Push a docker-save tar to a private registry
 
-### Memory Optimization Strategy
-
-```
-Traditional Approach (High Memory):
-[Registry] → [Full Image in Memory] → [Local Storage]
-     ↓
-❌ Memory usage scales with image size
-❌ Can exceed available RAM with large images
-
-Optimized Approach (Low Memory):  
-[Registry] → [Stream Layer by Layer] → [Local Storage]
-     ↓
-✅ Constant memory usage regardless of image size
-✅ Handles multi-GB images efficiently
+```bash
+docker-image-pusher login harbor.xxx.com --username USER --password PASS
+docker-image-pusher push --tar ./app_1.0.0.tar \
+    --target harbor.xxx.com/org/app:1.0.0
 ```
 
-### State Directory
+Notes:
+- Use `--target` to specify the destination (registry/org/repo:tag)
+- Use `--registry harbor.xxx.com` only if a host override is needed
+- `--blob-chunk` sets chunk size (MiB) for large layers
 
-Credential material and push history are stored under `.docker-image-pusher/`:
+### 2) Push directly from containerd (no tar)
 
+```bash
+docker-image-pusher push \
+    --root ~/.local/share/containerd \
+    --namespace default \
+    --image org/app:1.0.0 \
+    --target harbor.xxx.com/org/app:1.0.0
 ```
-.docker-image-pusher/
-├── credentials.json   # registry → username/password pairs from `login`
-└── push_history.json  # most recent destinations (used for inference/prompts)
+
+Optional: export for offline delivery/audit, then push when needed:
+
+```bash
+docker-image-pusher save \
+    --root ~/.local/share/containerd \
+    --namespace default \
+    --out ./export \
+    org/app:1.0.0
 ```
 
-Tar archives produced by `save` live wherever you choose to write them (current directory by default). They remain ordinary `docker save` outputs, so you can transfer them, scan them, or delete them independently of the CLI state.
-
-### Processing Flow
-
-#### Save Operation (runtime → tar):
-1. **Runtime detection** – locate Docker, nerdctl, or Podman (or honor `--runtime`).
-2. **Image selection** – parse JSON output from `images --format '{{json .}}'` and optionally prompt.
-3. **Tar export** – call `<runtime> save image -o file.tar`, sanitizing filenames and warning before overwrites.
-
-#### Push Operation (tar → registry):
-1. **Authenticate** – load stored credentials or prompt for overrides.
-2. **Tar analysis** – extract RepoTags + manifest to infer the final destination.
-3. **Layer extraction** – stream each layer from the tar into temporary files while hashing and reporting progress.
-4. **Layer/config upload** – reuse existing blobs when present, otherwise stream in fixed-size chunks with telemetry.
-5. **Manifest publish** – rebuild the OCI manifest and push it once all blobs are present.
+Tip: First push to a new target may ask for a one‑time confirmation based on history/metadata; subsequent pushes auto‑continue.
 
 
-## 🤝 Welcome Contributing
+## 📚 More
 
+- Advanced architecture: see ARCHITECTURE.md
+- Reusable OCI library: crates/oci-core/README.md
 
-**Happy Docker image transferring! 🐳**
+## 🤝 Contributing
+
+PRs and issues welcome. Happy pushing! 🐳

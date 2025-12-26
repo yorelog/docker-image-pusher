@@ -1,19 +1,30 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use containerd_store::ContainerdStore;
-use oci_core::auth::RegistryAuth;
-use oci_core::blobs::{LayerUploadOptions, LayerUploadPool, LocalLayer, ProgressOptions};
-use oci_core::client::Client;
-use oci_core::manifest::OciImageManifest;
-use oci_core::reference::Reference;
+use oci_core::{
+    auth::RegistryAuth,
+    blobs::{LayerUploadOptions, LocalLayer, ProgressOptions},
+    client::Client,
+    manifest::OciImageManifest,
+    reference::Reference,
+    workflows::push::{
+        check_and_filter_layers, check_config_exists, push_index_bytes_if_present,
+        push_manifest_bytes, upload_config_if_needed, upload_layers_concurrent,
+    },
+};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 
+use crate::common::{
+    report::report_upload_summary,
+    auth::resolve_registry_credentials,
+    state,
+};
 use crate::{
     CHUNKED_LAYER_SIZE_BYTES, ESTIMATED_SPEED_MBPS, LARGE_LAYER_PROGRESS_INTERVAL_SECS,
     LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
-    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS, state,
+    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS,
 };
 
 pub async fn run_push_containerd(
@@ -47,28 +58,11 @@ pub async fn run_push_containerd(
         .map_err(|e| PusherError::push_error(format!("Failed to load manifest: {e}")))?;
     let manifest = manifest_payload.manifest.clone();
 
-    // Gather layers and check remote existence
+    // Build digest table from manifest layers
+    println!("🔍 Building digest table for {} layers...", manifest.layers.len());
     let mut layers = Vec::new();
     for layer in &manifest.layers {
         let digest = layer.digest.clone();
-        
-        // Check if blob already exists in registry
-        match client.blob_exists(&target_ref, &digest, auth.as_ref()).await {
-            Ok(true) => {
-                println!("   ⏭️  Layer {} already in registry, skipping", digest);
-                continue;
-            }
-            Ok(false) => {
-                // Blob doesn't exist, proceed with upload
-            }
-            Err(err) => {
-                println!(
-                    "   ⚠️  Unable to check layer {} in registry (will attempt upload): {}",
-                    digest, err
-                );
-            }
-        }
-        
         let path = digest_to_path(&store, &digest)?;
         let meta = fs::metadata(&path).map_err(|e| {
             PusherError::push_error(format!(
@@ -84,6 +78,12 @@ pub async fn run_push_containerd(
             path,
         });
     }
+    println!("📋 Digest table ready with {} layer(s)", layers.len());
+
+    // Check remote and filter layers
+    let check_result = check_and_filter_layers(client, &target_ref, auth.as_ref(), layers)
+        .await
+        .map_err(|e| PusherError::push_error(format!("Failed to check layers: {e}")))?;
 
     // Upload layers with bounded concurrency.
     let chunk_size_bytes = blob_chunk
@@ -103,65 +103,62 @@ pub async fn run_push_containerd(
             normal_interval_secs: NORMAL_LAYER_PROGRESS_INTERVAL_SECS,
             estimated_speed_mbps: ESTIMATED_SPEED_MBPS,
         },
-        progress_reporter: Some(crate::progress_display::docker_like_progress_reporter()),
+        progress_reporter: Some(crate::common::display::docker_like_progress_reporter()),
     };
 
-    println!("📤 Uploading layers for {} ({} to upload)", target_ref, layers.len());
-    let (tx, rx) = mpsc::channel::<LocalLayer>(upload_options.concurrency * 2);
-    for layer in layers {
-        tx.send(layer)
-            .await
-            .map_err(|e| PusherError::push_error(format!("Failed to enqueue layer: {e}")))?;
-    }
-    drop(tx);
+    let upload_summary = upload_layers_concurrent(
+        client,
+        &target_ref,
+        Arc::new(auth.as_ref().clone()),
+        check_result.layers_to_upload,
+        upload_options,
+    )
+    .await
+    .map_err(|e| PusherError::push_error(format!("Failed to upload layers: {e}")))?;
 
-    let uploader = LayerUploadPool::new(client, &target_ref, auth.clone(), upload_options);
-    let upload_summary = uploader
-        .upload_stream(rx)
-        .await
-        .map_err(|e| PusherError::push_error(format!("Layer upload failed: {e}")))?;
-    if upload_summary.skipped > 0 {
-        println!("💡 Skipped {} existing layer(s) during upload", upload_summary.skipped);
-    }
+    report_upload_summary(upload_summary.uploaded.len(), check_result.skipped_count);
 
-    // Push config blob
+    // Handle config blob using digest table approach
     let config_digest = &manifest.config.digest;
-    
-    // Check if config already exists in registry
-    match client.blob_exists(&target_ref, config_digest, auth.as_ref()).await {
-        Ok(true) => {
-            println!("   ⏭️  Config {} already in registry, skipping", config_digest);
-        }
-        Ok(false) | Err(_) => {
-            let config_path = digest_to_path(&store, config_digest)?;
-            let config_bytes = fs::read(&config_path).map_err(|e| {
-                PusherError::push_error(format!("Failed to read config {}: {e}", config_digest))
-            })?;
-            println!("⚙️  Uploading config {}", config_digest);
-            client
-                .push_blob(&target_ref, auth.as_ref(), &config_bytes, config_digest)
-                .await
-                .map_err(|e| PusherError::push_error(format!("Failed to upload config: {e}")))?;
-        }
-    }
+    let config_path = digest_to_path(&store, config_digest)?;
+    let config_bytes = fs::read(&config_path).map_err(|e| {
+        PusherError::push_error(format!("Failed to read config {}: {e}", config_digest))
+    })?;
 
-    println!("📋 Pushing manifest to registry: {}", target_image);
-    client
-        .push_manifest_bytes(
-            &target_ref,
-            &manifest_payload.manifest_media_type,
-            &manifest_payload.manifest_bytes,
-            auth.as_ref(),
-        )
+    let config_exists = check_config_exists(client, &target_ref, auth.as_ref(), config_digest)
         .await
-        .map_err(|e| PusherError::push_error(format!("Failed to push manifest: {e}")))?;
+        .map_err(|e| PusherError::push_error(format!("Failed to check config: {e}")))?;
+    upload_config_if_needed(
+        client,
+        &target_ref,
+        auth.as_ref(),
+        config_digest,
+        &config_bytes,
+        config_exists,
+    )
+    .await
+    .map_err(|e| PusherError::push_error(format!("Failed to upload config: {e}")))?;
+
+    push_manifest_bytes(
+        client,
+        &target_ref,
+        auth.as_ref(),
+        &manifest_payload.manifest_media_type,
+        &manifest_payload.manifest_bytes,
+    )
+    .await
+    .map_err(|e| PusherError::push_error(format!("Failed to push manifest: {e}")))?;
 
     if let Some(index) = manifest_payload.index {
-        println!("📦 Pushing index for tag (platform-limited)");
-        client
-            .push_manifest_bytes(&target_ref, &index.media_type, &index.bytes, auth.as_ref())
-            .await
-            .map_err(|e| PusherError::push_error(format!("Failed to push index: {e}")))?;
+        push_index_bytes_if_present(
+            client,
+            &target_ref,
+            auth.as_ref(),
+            Some(&index.media_type),
+            Some(&index.bytes),
+        )
+        .await
+        .map_err(|e| PusherError::push_error(format!("Failed to push index: {e}")))?;
     }
 
     state::record_push_target(&target_image).await?;
@@ -505,15 +502,5 @@ async fn resolve_credentials(
     username: Option<String>,
     password: Option<String>,
 ) -> Result<(String, String), PusherError> {
-    if let (Some(u), Some(p)) = (username, password) {
-        return Ok((u, p));
-    }
-    let registry = target_ref.registry_host();
-    if let Ok(Some((u, p))) = state::load_credentials(registry).await {
-        return Ok((u, p));
-    }
-    Err(PusherError::push_error(format!(
-        "Credentials required for registry {}. Pass --username/--password or login first.",
-        registry
-    )))
+    resolve_registry_credentials(target_ref.registry_host(), username, password).await
 }

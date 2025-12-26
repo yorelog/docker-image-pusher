@@ -1,11 +1,9 @@
 use clap::{Parser, Subcommand};
 use thiserror::Error;
 
-mod containerd_import;
-mod progress_display;
+mod common;
+mod import;
 mod push;
-mod state;
-mod tar_import;
 
 use oci_core::client::{Client, ClientConfig};
 
@@ -13,7 +11,7 @@ pub const STATE_DIR: &str = ".docker-image-pusher";
 pub const STREAM_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 pub const PROGRESS_LAYER_THRESHOLD_BYTES: u64 = 500 * 1024 * 1024;
 pub const PROGRESS_UPDATE_INTERVAL_SECS: u64 = 3;
-pub const CHUNKED_LAYER_SIZE_BYTES: usize = 5 * 1024 * 1024;
+pub const CHUNKED_LAYER_SIZE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_CHUNKED_LAYER_SIZE_BYTES: usize = 256 * 1024 * 1024;
 pub const LARGE_LAYER_THRESHOLD_BYTES: u64 = 500 * 1024 * 1024;
 pub const LARGE_LAYER_THRESHOLD_MB: f64 = 500.0;
@@ -165,7 +163,7 @@ async fn main() -> Result<(), PusherError> {
                 let image = image.ok_or_else(|| {
                     PusherError::push_error("--image is required when pushing from containerd")
                 })?;
-                containerd_import::run_push_containerd(
+                import::containerd::run_push_containerd(
                     &client,
                     root.as_deref(),
                     &namespace,
@@ -186,7 +184,7 @@ async fn main() -> Result<(), PusherError> {
             out,
             digest,
         } => {
-            containerd_import::export_images(
+            import::containerd::export_images(
                 root.as_deref(),
                 &namespace,
                 &images,
@@ -196,14 +194,14 @@ async fn main() -> Result<(), PusherError> {
             .await?;
         }
         Commands::ListContainerd { root, namespace } => {
-            containerd_import::list_images(root.as_deref(), &namespace).await?;
+            import::containerd::list_images(root.as_deref(), &namespace).await?;
         }
         Commands::Login {
             registry,
             username,
             password,
         } => {
-            state::store_credentials(&registry, &username, &password).await?;
+            common::state::store_credentials(&registry, &username, &password).await?;
             println!(" Stored credentials for {}", registry);
         }
     }

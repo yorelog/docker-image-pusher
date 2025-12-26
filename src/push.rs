@@ -9,25 +9,32 @@ use tokio::{
 };
 
 use crate::{
-    CHUNKED_LAYER_SIZE_BYTES, ESTIMATED_SPEED_MBPS, LARGE_LAYER_PROGRESS_INTERVAL_SECS,
-    LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
-    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS,
-    progress_display::docker_like_progress_reporter,
-    state,
-    tar_import::{
+    common::{
+        report::report_upload_summary,
+        display::docker_like_progress_reporter,
+        state,
+    },
+    import::tar::{
         TarExtraction, TarRepoInfo, build_target_from_tar, extract_tar_archive_with_sender,
         infer_target_from_history, tar_repo_info_from_path,
     },
+    CHUNKED_LAYER_SIZE_BYTES, ESTIMATED_SPEED_MBPS, LARGE_LAYER_PROGRESS_INTERVAL_SECS,
+    LARGE_LAYER_THRESHOLD_BYTES, LARGE_LAYER_THRESHOLD_MB, MAX_CHUNKED_LAYER_SIZE_BYTES,
+    NORMAL_LAYER_PROGRESS_INTERVAL_SECS, PusherError, RATE_LIMIT_DELAY_MS,
 };
 
 const DEFAULT_UPLOAD_CONCURRENCY: usize = 3;
 const MEDIUM_LAYER_THRESHOLD_MB: f64 = 250.0;
 use oci_core::{
     auth::RegistryAuth,
-    blobs::{LayerUploadOptions, LayerUploadPool, LocalLayer, ProgressOptions},
+    blobs::{LayerUploadOptions, LocalLayer, ProgressOptions},
     client::Client,
     manifest::{OciDescriptor, OciImageManifest},
     reference::Reference,
+    workflows::push::{
+        check_and_filter_layers, check_config_exists, upload_config_if_needed,
+        upload_layers_concurrent, push_manifest_bytes,
+    },
 };
 
 /// Captures everything needed to execute a push once analysis is finished.
@@ -134,7 +141,6 @@ impl<'a> PushWorkflow<'a> {
             &plan.target_ref,
             &plan.username,
             &plan.password,
-            &plan.target,
         )
         .await
     }
@@ -208,31 +214,48 @@ impl<'a> PushWorkflow<'a> {
         }
     }
 
-    /// Uploads all layers/config extracted from a docker-save tarball.
+    /// Uploads all layers/config extracted from a docker-save tarball with digest table pre-flight.
     async fn push_tar_archive(
         &self,
         tar_path: &str,
         target_ref: &Reference,
         username: &str,
         password: &str,
-        target_label: &str,
     ) -> Result<(), PusherError> {
         let auth = Arc::new(RegistryAuth::basic(username, password));
         println!(
             "🔐 Preparing registry session with {}",
             target_ref.registry_host()
         );
-        println!(
-            "📤 Uploading layers with up to {} concurrent streams...",
-            self.upload_parallelism
-        );
 
-        let (layer_tx, layer_rx) = mpsc::channel::<LocalLayer>(self.upload_parallelism * 2);
+        // First extract tar to get digest table
+        println!("📦 Extracting tar archive to build digest table...");
+        let (layer_tx, _layer_rx) = mpsc::channel::<LocalLayer>(self.upload_parallelism * 2);
         let tar_path_string = tar_path.to_string();
         let extraction_handle = task::spawn_blocking(move || {
             extract_tar_archive_with_sender(&tar_path_string, Some(layer_tx))
         });
 
+        let extraction = extraction_handle.await.map_err(|err| {
+            PusherError::push_error(format!("Tar extraction task failed: {}", err))
+        })??;
+
+        // Check remote and filter layers
+        let check_result = check_and_filter_layers(
+            self.client,
+            target_ref,
+            auth.as_ref(),
+            extraction.layers.clone(),
+        )
+        .await
+        .map_err(|e| PusherError::push_error(format!("Failed to check layers: {e}")))?;
+
+        // Check config blob
+        let config_exists = check_config_exists(self.client, target_ref, auth.as_ref(), &extraction.config_digest)
+            .await
+            .map_err(|e| PusherError::push_error(format!("Failed to check config: {e}")))?;
+
+        // Now upload filtered layers
         let upload_options = LayerUploadOptions {
             chunk_size_bytes: self.chunk_size_bytes,
             large_layer_threshold_bytes: LARGE_LAYER_THRESHOLD_BYTES,
@@ -248,47 +271,48 @@ impl<'a> PushWorkflow<'a> {
             progress_reporter: Some(docker_like_progress_reporter()),
         };
 
-        let uploader =
-            LayerUploadPool::new(self.client, target_ref, Arc::clone(&auth), upload_options);
-        let upload_summary = uploader
-            .upload_stream(layer_rx)
-            .await
-            .map_err(|err| PusherError::PushError(format!("Failed to upload layers: {}", err)))?;
+        let upload_summary = upload_layers_concurrent(
+            self.client,
+            target_ref,
+            Arc::clone(&auth),
+            check_result.layers_to_upload,
+            upload_options,
+        )
+        .await
+        .map_err(|e| PusherError::push_error(format!("Failed to upload layers: {e}")))?;
 
-        let extraction = extraction_handle.await.map_err(|err| {
-            PusherError::push_error(format!("Tar extraction task failed: {}", err))
-        })??;
+        report_upload_summary(upload_summary.uploaded.len(), check_result.skipped_count);
 
-        if upload_summary.skipped > 0 {
-            println!(
-                "💡 Skipped {} layer(s) that already existed in the registry",
-                upload_summary.skipped
-            );
-        }
+        // Upload config if it doesn't exist
+        upload_config_if_needed(
+            self.client,
+            target_ref,
+            auth.as_ref(),
+            &extraction.config_digest,
+            &extraction.config_contents,
+            config_exists,
+        )
+        .await
+        .map_err(|e| PusherError::push_error(format!("Failed to upload config: {e}")))?;
 
-        println!("⚙️  Uploading config: {}", extraction.config_digest);
-        self.client
-            .push_blob(
-                target_ref,
-                auth.as_ref(),
-                &extraction.config_contents,
-                &extraction.config_digest,
-            )
-            .await
-            .map_err(|e| PusherError::PushError(format!("Failed to upload config: {}", e)))?;
-
-        println!("📋 Pushing manifest to registry: {}", target_label);
+        // Build and push manifest using common function
         let manifest = build_manifest(&extraction);
-        let manifest_url = self
-            .client
-            .push_manifest(target_ref, &manifest, auth.as_ref())
-            .await
-            .map_err(|e| PusherError::PushError(format!("Failed to push manifest: {}", e)))?;
+        let manifest_json = serde_json::to_vec(&manifest)
+            .map_err(|e| PusherError::push_error(format!("Failed to serialize manifest: {}", e)))?;
+        
+        push_manifest_bytes(
+            self.client,
+            target_ref,
+            auth.as_ref(),
+            "application/vnd.docker.distribution.manifest.v2+json",
+            &manifest_json,
+        )
+        .await
+        .map_err(|e| PusherError::push_error(format!("Failed to push manifest: {e}")))?;
 
         println!(
-            "🎉 Successfully pushed {} layers to {}",
-            upload_summary.uploaded.len(),
-            manifest_url
+            "🎉 Successfully pushed {} layers",
+            upload_summary.uploaded.len()
         );
         Ok(())
     }

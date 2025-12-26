@@ -20,6 +20,7 @@ use crate::reference::Reference;
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const OCTET_STREAM: &str = "application/octet-stream";
 const OCI_CHUNK_MIN_LENGTH: &str = "OCI-Chunk-Min-Length";
+const MAX_BLOB_RETRIES: usize = 2;
 
 #[derive(Clone, Default)]
 pub struct ClientConfig {
@@ -433,6 +434,36 @@ impl Client {
         data: &[u8],
         digest: &str,
     ) -> Result<(), OciError> {
+        let mut attempt = 0;
+        loop {
+            match self
+                .push_blob_once(reference, auth, data, digest)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OciError::UploadReset(reason)) if attempt < MAX_BLOB_RETRIES => {
+                    let trimmed = reason.chars().take(160).collect::<String>();
+                    println!(
+                        "   ⚠️  Registry invalidated upload session: {} (attempt {}/{})",
+                        trimmed,
+                        attempt + 1,
+                        MAX_BLOB_RETRIES + 1
+                    );
+                    attempt += 1;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn push_blob_once(
+        &self,
+        reference: &Reference,
+        auth: &RegistryAuth,
+        data: &[u8],
+        digest: &str,
+    ) -> Result<(), OciError> {
         let (mut upload_url, _) = self.begin_upload(reference, auth).await?;
         let scope = Self::push_scope(reference);
 
@@ -460,9 +491,14 @@ impl Client {
                 )
                 .await?;
             if resp.status() != StatusCode::ACCEPTED {
+                let status = resp.status();
+                let message = resp.text().await.unwrap_or_default();
+                if Self::requires_upload_reset(status, &message) {
+                    return Err(OciError::UploadReset(message));
+                }
                 return Err(OciError::Status {
-                    status: resp.status().as_u16(),
-                    message: resp.text().await.unwrap_or_default(),
+                    status: status.as_u16(),
+                    message,
                 });
             }
             if let Some(next) = resp.headers().get(LOCATION) {
@@ -493,9 +529,14 @@ impl Client {
             )
             .await?;
         if !resp.status().is_success() {
+            let status = resp.status();
+            let message = resp.text().await.unwrap_or_default();
+            if Self::requires_upload_reset(status, &message) {
+                return Err(OciError::UploadReset(message));
+            }
             return Err(OciError::Status {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message,
             });
         }
         Ok(())
@@ -606,9 +647,14 @@ impl Client {
             )
             .await?;
         if !resp.status().is_success() {
+            let status = resp.status();
+            let message = resp.text().await.unwrap_or_default();
+            if Self::requires_upload_reset(status, &message) {
+                return Err(OciError::UploadReset(message));
+            }
             return Err(OciError::Status {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message,
             });
         }
         Ok(())
@@ -726,9 +772,14 @@ impl Client {
             )
             .await?;
         if resp.status() != StatusCode::ACCEPTED {
+            let status = resp.status();
+            let message = resp.text().await.unwrap_or_default();
+            if Self::requires_upload_reset(status, &message) {
+                return Err(OciError::UploadReset(message));
+            }
             return Err(OciError::Status {
-                status: resp.status().as_u16(),
-                message: resp.text().await.unwrap_or_default(),
+                status: status.as_u16(),
+                message,
             });
         }
         let mut next_url = upload_url;

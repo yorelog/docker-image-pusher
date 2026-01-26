@@ -25,6 +25,7 @@ const MAX_BLOB_RETRIES: usize = 2;
 #[derive(Clone, Default)]
 pub struct ClientConfig {
     pub user_agent: Option<String>,
+    pub insecure_skip_tls_verify: bool,
 }
 
 fn env_flag(name: &str) -> bool {
@@ -72,12 +73,19 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
-        let builder = reqwest::Client::builder().user_agent(
+        let mut builder = reqwest::Client::builder().user_agent(
             config
                 .user_agent
                 .clone()
                 .unwrap_or_else(|| "docker-image-pusher/0.0".to_string()),
         );
+        
+        // 如果配置了跳过 TLS 验证，则禁用证书验证
+        if config.insecure_skip_tls_verify {
+            eprintln!("[TLS] ⚠️  Warning: TLS certificate verification is disabled.（insecure mode）");
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        
         let http = builder.build().expect("Failed to build client");
         Self {
             http,

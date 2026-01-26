@@ -28,6 +28,10 @@ pub const GZIP_MAGIC_BYTES: [u8; 2] = [0x1F, 0x8B];
     about = "Stream large Docker/OCI images through a tiny local cache"
 )]
 struct Cli {
+    /// Skip TLS certificate verification (for self-signed certificates)
+    #[arg(long, global = true)]
+    insecure: bool,
+    
     #[command(subcommand)]
     command: Commands,
 }
@@ -140,7 +144,10 @@ impl PusherError {
 #[tokio::main]
 async fn main() -> Result<(), PusherError> {
     let cli = Cli::parse();
-    let client = Client::new(ClientConfig::default());
+    let client = Client::new(ClientConfig {
+        user_agent: None,
+        insecure_skip_tls_verify: cli.insecure,
+    });
 
     match cli.command {
         Commands::Push {

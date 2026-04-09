@@ -72,6 +72,12 @@ impl Bolt {
         let mut file = File::open(path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
+        Self::from_bytes(data)
+    }
+
+    /// Construct from in-memory bytes (e.g. when the caller already slurped the file).
+    /// Performs the same validation as [`open_ro`].
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
         if data.len() < 4096 {
             return Err(Error::Corrupt("file too small"));
         }
@@ -274,6 +280,14 @@ impl<'a> Iterator for BucketCursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_bytes_rejects_too_small() {
+        assert!(matches!(
+            Bolt::from_bytes(vec![0u8; 100]),
+            Err(Error::Corrupt("file too small"))
+        ));
+    }
 
     #[test]
     fn ok_opt_maps_result_option() {

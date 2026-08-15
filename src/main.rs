@@ -9,6 +9,7 @@ use oci_core::client::{Client, ClientConfig};
 
 pub const STATE_DIR: &str = ".docker-image-pusher";
 pub const STREAM_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+pub const DEFAULT_REGISTRY_SCHEME: &str = "https";
 pub const PROGRESS_LAYER_THRESHOLD_BYTES: u64 = 500 * 1024 * 1024;
 pub const PROGRESS_UPDATE_INTERVAL_SECS: u64 = 3;
 pub const CHUNKED_LAYER_SIZE_BYTES: usize = 10 * 1024 * 1024;
@@ -51,6 +52,9 @@ enum Commands {
         /// Override the destination reference (defaults to the source image)
         #[arg(short, long)]
         target: Option<String>,
+        /// Registry scheme to use for connections (http or https)
+        #[arg(long, default_value = DEFAULT_REGISTRY_SCHEME)]
+        scheme: String,
         /// Force a specific registry hostname
         #[arg(long)]
         registry: Option<String>,
@@ -149,11 +153,19 @@ async fn main() -> Result<(), PusherError> {
             namespace,
             image,
             target,
+            scheme,
             registry,
             username,
             password,
             blob_chunk,
         } => {
+            let effective_scheme = if scheme == "http" || scheme == "https" {
+                scheme
+            } else {
+                DEFAULT_REGISTRY_SCHEME.to_string()
+            };
+            let client = Client::new(ClientConfig::default().with_scheme(&effective_scheme));
+
             if let Some(tar_path) = tar {
                 push::run_push(
                     &client, &tar_path, target, username, password, registry, blob_chunk,
